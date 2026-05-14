@@ -178,18 +178,42 @@ def main() -> int:
         fail(f"Generate failed: {r.status_code} {r.text[:300]}")
         return 7
     gen = r.json()
-    assignment = gen.get("assignment", {})
+    a = gen.get("assignment", {})
     ok(f"status={gen.get('status')}", t.elapsed)
-    print(f"  Title: {assignment.get('title', '?')}")
-    print(f"  Stages: {len(assignment.get('instructions', []))}")
-    print(f"  Rubric items: {len(assignment.get('rubric', []))}")
-    print(f"  AI policy: {assignment.get('ai_policy_summary', '?')[:100]}")
+    print(f"  Title: {a.get('title', '?')}")
 
-    # Print stages summary
-    for s in assignment.get("instructions", []):
+    stages = a.get("stages") or a.get("instructions") or []
+    rubric = a.get("rubric", [])
+    gs = a.get("grading_summary", {})
+
+    print(f"  Stages: {len(stages)}")
+    print(f"  Rubric items: {len(rubric)}")
+
+    if gs:
+        print(f"  Grading: Process {gs.get('process_total_percentage', '?')}% / Final {gs.get('final_output_total_percentage', '?')}%")
+
+    if a.get("platform_notice"):
+        print(f"  Platform: {a['platform_notice'][:100]}")
+
+    print(f"  AI policy: {a.get('ai_policy_summary', '?')[:100]}")
+
+    for s in stages:
         policy = s.get("ai_policy", "?")
         icon = {"Red": "🔴", "Yellow": "🟡", "Green": "🟢"}.get(policy, "⚪")
-        print(f"    {icon} {s.get('stage', '?')} — AI: {policy}")
+        name = s.get("stage_name") or s.get("stage", "?")
+        cp = " [checkpoint]" if s.get("is_checkpoint") else ""
+        fp = " [friction]" if s.get("is_friction_point") else ""
+        role = f" (AI role: {s['ai_role']})" if s.get("ai_role") else ""
+        print(f"    {icon} {name} — AI: {policy}{cp}{fp}{role}")
+
+    print()
+    for item in rubric:
+        cat = f"[{item.get('category', '')}]" if item.get("category") else ""
+        w = item.get("weight_percentage") or item.get("weight", "?")
+        print(f"    {w}% {cat} {item.get('criterion', '?')}")
+
+    if a.get("integrity_note"):
+        print(f"\n  Integrity: {a['integrity_note'][:120]}")
 
     # ── Summary ──
     wall = time.perf_counter() - wall_start

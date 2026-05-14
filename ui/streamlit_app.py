@@ -1,12 +1,6 @@
 """
-Internal testing dashboard — simple flow:
-  1. Upload/ingest PDF
-  2. Index (chunk + embed)
-  3. Generate assignment plan
-  4. Approve plan
-  5. Generate final assignment
-
-Run:  cd /path/to/backend && streamlit run ui/streamlit_app.py
+Assignment Platform — Teacher + Student UI
+  cd /path/to/backend && streamlit run ui/streamlit_app.py
 """
 
 from __future__ import annotations
@@ -34,16 +28,13 @@ def base() -> str:
     return st.session_state.get("api_base", "http://127.0.0.1:8000").rstrip("/")
 
 
-# ── Sidebar: connection + health ──
+# ── Sidebar ──
 
 with st.sidebar:
-    st.session_state["api_base"] = st.text_input(
-        "API base URL", value="http://127.0.0.1:8000"
-    ).rstrip("/")
-
+    st.session_state["api_base"] = st.text_input("API URL", value="http://127.0.0.1:8000").rstrip("/")
     try:
         r = requests.get(f"{base()}/", timeout=3)
-        st.success(f"API up: {r.json().get('message', 'OK')}")
+        st.success(f"API: {r.json().get('message', 'OK')}")
     except Exception as e:
         st.error(f"API down: {e}")
         st.stop()
@@ -62,234 +53,391 @@ with st.sidebar:
             st.error(ho.get("detail") or str(ho))
 
 
-# ── Step 1: Ingest PDF ──
+# ── Tabs ──
 
-st.header("Step 1 — Upload PDF")
-st.caption("Extracts text + figures from the PDF. No OpenAI calls.")
+tab_teacher, tab_student = st.tabs(["Teacher — Design Assignment", "Student — Do Assignment"])
 
-col1, col2 = st.columns(2)
-with col1:
-    repo_rel = st.text_input("Repo path", "fecu1dd/fecu101.pdf")
-    btitle = st.text_input("Book title", "FECU 101")
-    if st.button("Extract from repo", type="primary"):
-        with st.spinner("Extracting…"):
-            r = requests.post(
-                f"{base()}/books/ingest-repo-pdf",
-                data={"title": btitle, "relative_path": repo_rel},
-                timeout=600,
-            )
-        if r.ok:
-            st.session_state["book_id"] = r.json()["book_id"]
-            st.success(f"Done — book_id={r.json()['book_id']}")
-        else:
-            st.error(r.text)
 
-with col2:
-    uf = st.file_uploader("Or upload PDF", type=["pdf"])
-    if uf and st.button("Upload & extract"):
-        with st.spinner("Uploading…"):
-            rr = requests.post(
-                f"{base()}/books/upload",
-                files={"file": (uf.name, uf.getvalue(), "application/pdf")},
-                data={"title": btitle},
-                timeout=600,
-            )
-        if rr.ok:
-            st.session_state["book_id"] = rr.json()["book_id"]
-            st.success(f"Done — book_id={rr.json()['book_id']}")
-        else:
-            st.error(rr.text)
+# ============================================================
+# TEACHER TAB
+# ============================================================
 
-st.divider()
+with tab_teacher:
 
-# ── Step 2: Index (chunk + embed) ──
-
-st.header("Step 2 — Chunk + Embed")
-st.caption("Splits text into chunks (no LLM), then embeds all chunks in one batch OpenAI call. Fast.")
-
-if "book_id" not in st.session_state:
-    st.info("Complete Step 1 first.")
-else:
-    bid = st.session_state["book_id"]
-    st.write(f"**book_id:** `{bid}`")
-
-    icol1, icol2 = st.columns(2)
-    with icol1:
-        max_pg = st.number_input("Max pages (0 = all)", min_value=0, value=0, step=1)
-    with icol2:
-        force = st.checkbox("Force restart", value=False)
-
-    if st.button("Start indexing", type="primary"):
-        params: dict = {"background": False}
-        if max_pg > 0:
-            params["max_pages"] = int(max_pg)
-        if force:
-            params["force_restart"] = True
-
-        with st.spinner("Indexing — chunking text + calling OpenAI embeddings…"):
-            t0 = time.time()
-            r = requests.post(
-                f"{base()}/books/{bid}/index",
-                params=params,
-                timeout=3600,
-            )
-            elapsed = time.time() - t0
-
-        if r.ok:
-            data = r.json()
-            st.success(f"Done in {elapsed:.1f}s — {data.get('chunks_created', '?')} chunks created")
-            st.json(data)
-        else:
-            st.error(f"{r.status_code}: {r.text}")
-
-st.divider()
-
-# ── Step 3: Generate assignment plan ──
-
-st.header("Step 3 — Generate Assignment Plan")
-st.caption("Uses RAG (retrieves relevant chunks) + GPT-4o to design the assignment following the 6-step instructor protocol.")
-
-if "book_id" not in st.session_state:
-    st.info("Complete Steps 1-2 first.")
-else:
-    at = st.text_input("Assignment title", "Sample Assignment")
-    obj = st.text_area("Learning objectives (one per line)", "Students apply concepts from the text.")
-    scope = st.text_input("Scope / retrieval query", "opening chapter concepts")
-    notes = st.text_area("Teacher notes (optional)", "", height=68)
-
-    if st.button("Generate Plan", type="primary"):
-        objectives = [x.strip() for x in obj.split("\n") if x.strip()]
-        if not objectives:
-            st.error("Add at least one learning objective.")
-        elif not scope.strip():
-            st.error("Scope cannot be empty.")
-        else:
-            with st.spinner("Generating plan with GPT-4o…"):
-                t0 = time.time()
-                pr = requests.post(
-                    f"{base()}/assignments/generate-plan",
-                    json={
-                        "book_id": st.session_state["book_id"],
-                        "title": at.strip(),
-                        "learning_objectives": objectives,
-                        "scope_query": scope.strip(),
-                        "notes": notes,
-                    },
-                    timeout=300,
-                )
-                elapsed = time.time() - t0
-
-            if pr.ok:
-                data = pr.json()
-                st.session_state["assignment_id"] = data["assignment_id"]
-                st.session_state["plan"] = data.get("plan")
-                st.success(f"Plan generated in {elapsed:.1f}s — assignment_id={data['assignment_id']}")
-                st.json(data["plan"])
-            else:
-                st.error(f"{pr.status_code}: {pr.text}")
-
-st.divider()
-
-# ── Step 4: Approve plan ──
-
-st.header("Step 4 — Approve Plan")
-st.caption("Review the plan above. Approve it as-is, or edit and re-approve.")
-
-if "assignment_id" not in st.session_state:
-    st.info("Generate a plan first (Step 3).")
-else:
-    aid = st.session_state["assignment_id"]
-    st.write(f"**assignment_id:** `{aid}`")
-
-    if "plan" in st.session_state and st.session_state["plan"]:
-        with st.expander("Current plan", expanded=True):
-            st.json(st.session_state["plan"])
-
-    col_a, col_r = st.columns(2)
-    with col_a:
-        if st.button("Approve Plan", type="primary"):
-            with st.spinner("Approving…"):
+    # Step 1: Ingest
+    st.header("Step 1 — Upload PDF")
+    col1, col2 = st.columns(2)
+    with col1:
+        repo_rel = st.text_input("Repo path", "fecu1dd/fecu101.pdf")
+        btitle = st.text_input("Book title", "FECU 101")
+        if st.button("Extract from repo", type="primary"):
+            with st.spinner("Extracting…"):
                 r = requests.post(
-                    f"{base()}/assignments/{aid}/approve",
-                    json={"approved": True},
-                    timeout=30,
+                    f"{base()}/books/ingest-repo-pdf",
+                    data={"title": btitle, "relative_path": repo_rel},
+                    timeout=600,
                 )
             if r.ok:
-                st.session_state["approved"] = True
-                st.success(f"Plan approved! → {r.json().get('next_step', '')}")
+                st.session_state["book_id"] = r.json()["book_id"]
+                st.success(f"Done — book_id={r.json()['book_id']}")
             else:
                 st.error(r.text)
+    with col2:
+        uf = st.file_uploader("Or upload PDF", type=["pdf"])
+        if uf and st.button("Upload & extract"):
+            with st.spinner("Uploading…"):
+                rr = requests.post(
+                    f"{base()}/books/upload",
+                    files={"file": (uf.name, uf.getvalue(), "application/pdf")},
+                    data={"title": btitle},
+                    timeout=600,
+                )
+            if rr.ok:
+                st.session_state["book_id"] = rr.json()["book_id"]
+                st.success(f"Done — book_id={rr.json()['book_id']}")
+            else:
+                st.error(rr.text)
 
-    with col_r:
-        if st.button("Reject (back to draft)"):
-            r = requests.post(
-                f"{base()}/assignments/{aid}/approve",
-                json={"approved": False},
-                timeout=30,
-            )
+    st.divider()
+
+    # Step 2: Index
+    st.header("Step 2 — Chunk + Embed")
+    if "book_id" not in st.session_state:
+        st.info("Complete Step 1 first.")
+    else:
+        bid = st.session_state["book_id"]
+        st.write(f"**book_id:** `{bid}`")
+        icol1, icol2 = st.columns(2)
+        with icol1:
+            max_pg = st.number_input("Max pages (0 = all)", min_value=0, value=0, step=1)
+        with icol2:
+            force = st.checkbox("Force restart", value=False)
+        if st.button("Start indexing", type="primary"):
+            params: dict = {"background": False}
+            if max_pg > 0:
+                params["max_pages"] = int(max_pg)
+            if force:
+                params["force_restart"] = True
+            with st.spinner("Indexing…"):
+                t0 = time.time()
+                r = requests.post(f"{base()}/books/{bid}/index", params=params, timeout=3600)
+                elapsed = time.time() - t0
             if r.ok:
-                st.session_state.pop("approved", None)
-                st.warning("Plan rejected — edit and regenerate if needed.")
+                st.success(f"Done in {elapsed:.1f}s — {r.json().get('chunks_created', '?')} chunks")
             else:
-                st.error(r.text)
+                st.error(f"{r.status_code}: {r.text}")
 
-st.divider()
+    st.divider()
 
-# ── Step 5: Generate final assignment ──
+    # Step 3: Generate plan
+    st.header("Step 3 — Generate Plan")
+    if "book_id" not in st.session_state:
+        st.info("Complete Steps 1-2 first.")
+    else:
+        at = st.text_input("Assignment title", "Sample Assignment")
+        obj = st.text_area("Learning objectives (one per line)", "Students apply concepts from the text.")
+        scope = st.text_input("Scope / retrieval query", "opening chapter concepts")
+        notes = st.text_area("Teacher notes", "", height=68)
+        if st.button("Generate Plan", type="primary"):
+            objectives = [x.strip() for x in obj.split("\n") if x.strip()]
+            if not objectives:
+                st.error("Add at least one learning objective.")
+            elif not scope.strip():
+                st.error("Scope cannot be empty.")
+            else:
+                with st.spinner("Generating plan…"):
+                    t0 = time.time()
+                    pr = requests.post(f"{base()}/assignments/generate-plan", json={
+                        "book_id": st.session_state["book_id"],
+                        "title": at.strip(), "learning_objectives": objectives,
+                        "scope_query": scope.strip(), "notes": notes,
+                    }, timeout=300)
+                    elapsed = time.time() - t0
+                if pr.ok:
+                    data = pr.json()
+                    st.session_state["assignment_id"] = data["assignment_id"]
+                    st.session_state["plan"] = data.get("plan")
+                    st.success(f"Plan generated in {elapsed:.1f}s — assignment_id={data['assignment_id']}")
+                    st.json(data["plan"])
+                else:
+                    st.error(f"{pr.status_code}: {pr.text}")
 
-st.header("Step 5 — Generate Final Assignment")
-st.caption("Takes the approved plan and generates the complete assignment: instructions, rubric, AI policy per stage, deliverables.")
+    st.divider()
 
-if "assignment_id" not in st.session_state:
-    st.info("Complete Steps 3-4 first.")
-elif not st.session_state.get("approved"):
-    st.warning("Approve the plan first (Step 4).")
-else:
-    aid = st.session_state["assignment_id"]
-    extra_notes = st.text_area("Additional notes for generation (optional)", "", height=68, key="gen_notes")
+    # Step 4: Approve
+    st.header("Step 4 — Approve Plan")
+    if "assignment_id" not in st.session_state:
+        st.info("Generate a plan first.")
+    else:
+        aid = st.session_state["assignment_id"]
+        if "plan" in st.session_state and st.session_state["plan"]:
+            with st.expander("Current plan", expanded=True):
+                st.json(st.session_state["plan"])
+        col_a, col_r = st.columns(2)
+        with col_a:
+            if st.button("Approve", type="primary"):
+                r = requests.post(f"{base()}/assignments/{aid}/approve", json={"approved": True}, timeout=30)
+                if r.ok:
+                    st.session_state["approved"] = True
+                    st.success("Plan approved!")
+                else:
+                    st.error(r.text)
+        with col_r:
+            if st.button("Reject"):
+                r = requests.post(f"{base()}/assignments/{aid}/approve", json={"approved": False}, timeout=30)
+                if r.ok:
+                    st.session_state.pop("approved", None)
+                    st.warning("Rejected — regenerate if needed.")
+                else:
+                    st.error(r.text)
 
-    if st.button("Generate Assignment", type="primary"):
-        with st.spinner("Generating full assignment with GPT-4o…"):
-            t0 = time.time()
-            r = requests.post(
-                f"{base()}/assignments/{aid}/generate",
-                json={
-                    "scope_query": st.session_state.get("scope_query", ""),
+    st.divider()
+
+    # Step 5: Generate final assignment
+    st.header("Step 5 — Generate Final Assignment")
+    if "assignment_id" not in st.session_state:
+        st.info("Complete Steps 3-4 first.")
+    elif not st.session_state.get("approved"):
+        st.warning("Approve the plan first.")
+    else:
+        aid = st.session_state["assignment_id"]
+        extra_notes = st.text_area("Extra notes for generation", "", height=68, key="gen_notes")
+        if st.button("Generate Assignment", type="primary"):
+            with st.spinner("Generating…"):
+                t0 = time.time()
+                r = requests.post(f"{base()}/assignments/{aid}/generate", json={
+                    "scope_query": scope if "scope" in dir() else "",
                     "notes": extra_notes,
-                },
-                timeout=300,
-            )
-            elapsed = time.time() - t0
-
-        if r.ok:
-            data = r.json()
-            st.success(f"Assignment generated in {elapsed:.1f}s!")
-            assignment = data.get("assignment", {})
-
-            st.subheader(assignment.get("title", "Assignment"))
-            st.write(assignment.get("description", ""))
-
-            if assignment.get("instructions"):
-                st.subheader("Stages")
-                for stage in assignment["instructions"]:
-                    color = {"Red": "🔴", "Yellow": "🟡", "Green": "🟢"}.get(
-                        stage.get("ai_policy", ""), "⚪"
-                    )
-                    with st.expander(f"{color} {stage.get('stage', 'Stage')} — AI: {stage.get('ai_policy', '?')}"):
+                }, timeout=300)
+                elapsed = time.time() - t0
+            if r.ok:
+                data = r.json()
+                st.success(f"Generated in {elapsed:.1f}s!")
+                a = data.get("assignment", {})
+                st.subheader(a.get("title", "Assignment"))
+                st.write(a.get("description", ""))
+                if a.get("platform_notice"):
+                    st.warning(a["platform_notice"])
+                gs = a.get("grading_summary", {})
+                if gs:
+                    st.info(f"**Grading:** Process {gs.get('process_total_percentage', '?')}% / Final {gs.get('final_output_total_percentage', '?')}%")
+                stages = a.get("stages") or []
+                for stage in stages:
+                    policy = stage.get("ai_policy", "?")
+                    icon = {"Red": "🔴", "Yellow": "🟡", "Green": "🟢"}.get(policy, "⚪")
+                    cp = " 📋" if stage.get("is_checkpoint") else ""
+                    fp = " ⚡" if stage.get("is_friction_point") else ""
+                    with st.expander(f"{icon} Stage {stage.get('stage_number', '?')}: {stage.get('stage_name', '')} — {policy}{cp}{fp}"):
                         st.write(stage.get("instructions", ""))
-                        st.caption(f"AI guidance: {stage.get('ai_guidance', '')}")
-                        st.caption(f"Deliverable: {stage.get('deliverable', '')}")
+                        if stage.get("ai_guidance"):
+                            st.markdown(f"**AI guidance:** {stage['ai_guidance']}")
+                        if stage.get("checkpoint_deliverable"):
+                            st.markdown(f"**Submit:** {stage['checkpoint_deliverable']}")
+                        if stage.get("friction_prompt"):
+                            st.markdown(f"**Justify:** _{stage['friction_prompt']}_")
+                if a.get("rubric"):
+                    st.subheader("Rubric")
+                    for item in a["rubric"]:
+                        cat = f" [{item.get('category', '')}]" if item.get("category") else ""
+                        w = item.get("weight_percentage") or item.get("weight", "?")
+                        st.write(f"**{item.get('criterion', '')}** — {w}%{cat}: {item.get('description', '')}")
+                if a.get("ai_policy_summary"):
+                    st.info(a["ai_policy_summary"])
+                with st.expander("Raw JSON"):
+                    st.json(data)
+            else:
+                st.error(f"{r.status_code}: {r.text}")
 
-            if assignment.get("rubric"):
-                st.subheader("Rubric")
-                for item in assignment["rubric"]:
-                    st.write(f"**{item.get('criterion', '')}** ({item.get('weight', '')}): {item.get('description', '')}")
 
-            if assignment.get("ai_policy_summary"):
-                st.subheader("AI Policy Summary")
-                st.info(assignment["ai_policy_summary"])
+# ============================================================
+# STUDENT TAB
+# ============================================================
 
-            with st.expander("Raw JSON"):
-                st.json(data)
+with tab_student:
+
+    st.header("Do Your Assignment")
+    st.caption("Work through each stage. Submit your checkpoint at each stage before moving on.")
+
+    # --- Start / resume ---
+    st.subheader("Start or Resume")
+    s_aid = st.number_input("Assignment ID", min_value=1, value=st.session_state.get("assignment_id", 1), step=1, key="s_aid")
+    s_name = st.text_input("Your name / student ID", "student_1", key="s_name")
+
+    if st.button("Start Assignment", key="start_btn"):
+        r = requests.post(f"{base()}/submissions/start", json={
+            "assignment_id": int(s_aid), "student_id": s_name,
+        }, timeout=30)
+        if r.ok:
+            d = r.json()
+            st.session_state["sub_id"] = d["submission_id"]
+            st.success(f"{d.get('message', 'Started')} — submission_id={d['submission_id']}")
         else:
             st.error(f"{r.status_code}: {r.text}")
+
+    if "sub_id" not in st.session_state:
+        st.info("Enter the assignment ID and your name above, then click Start.")
+    else:
+        sub_id = st.session_state["sub_id"]
+
+        # Fetch current state
+        sr = requests.get(f"{base()}/submissions/{sub_id}", timeout=30)
+        if not sr.ok:
+            st.error(f"Could not load submission: {sr.text}")
+        else:
+            sub = sr.json()
+            total = sub["total_stages"]
+            current_idx = sub["current_stage_index"]
+            current_stage = sub.get("current_stage")
+            all_stages = sub.get("all_stages") or []
+
+            st.divider()
+
+            # --- Progress bar ---
+            if total > 0:
+                frac = min(1.0, current_idx / total)
+                st.progress(frac, text=f"Stage {min(current_idx + 1, total)} of {total} — {sub['status']}")
+
+            # --- Show all stages with status ---
+            st.subheader("Assignment Stages")
+            for i, stage in enumerate(all_stages):
+                policy = stage.get("ai_policy", "?")
+                icon = {"Red": "🔴", "Yellow": "🟡", "Green": "🟢"}.get(policy, "⚪")
+                if i < current_idx:
+                    status_icon = "✅"
+                elif i == current_idx:
+                    status_icon = "👉"
+                else:
+                    status_icon = "🔒"
+
+                name = stage.get("stage_name", f"Stage {i+1}")
+                fp = " ⚡" if stage.get("is_friction_point") else ""
+                label = f"{status_icon} {icon} Stage {stage.get('stage_number', i+1)}: {name} — AI: {policy}{fp}"
+
+                if i < current_idx:
+                    with st.expander(label):
+                        st.success("Completed")
+                        st.caption(stage.get("instructions", ""))
+                elif i == current_idx:
+                    with st.expander(label, expanded=True):
+                        st.markdown(f"**Instructions:** {stage.get('instructions', '')}")
+
+                        if stage.get("ai_guidance"):
+                            if policy == "Red":
+                                st.error(f"🔴 AI NOT PERMITTED: {stage['ai_guidance']}")
+                            elif policy == "Yellow":
+                                st.warning(f"🟡 AI allowed with structure: {stage['ai_guidance']}")
+                            else:
+                                st.info(f"🟢 AI encouraged: {stage['ai_guidance']}")
+
+                        if stage.get("checkpoint_deliverable"):
+                            st.markdown(f"**What to submit:** {stage['checkpoint_deliverable']}")
+
+                        if stage.get("brain_first_requirement"):
+                            st.caption(f"Brain-first: {stage['brain_first_requirement']}")
+                else:
+                    st.markdown(f"{label}")
+
+            st.divider()
+
+            # --- Current stage work area ---
+            if sub["status"] == "submitted":
+                st.success("🎉 Assignment complete! All stages submitted.")
+
+                with st.expander("View your process log"):
+                    lr = requests.get(f"{base()}/submissions/{sub_id}/log", timeout=30)
+                    if lr.ok:
+                        log = lr.json().get("log", [])
+                        for entry in log:
+                            et = entry.get("event_type", "")
+                            ts = entry.get("timestamp", "")[:19]
+                            content = entry.get("content", {})
+                            if et == "checkpoint_submit":
+                                st.markdown(f"**{ts}** — 📋 Checkpoint: {content.get('stage_name', '')}")
+                                st.caption(f"Words: {content.get('word_count', '?')}")
+                            elif et == "ai_interaction":
+                                st.markdown(f"**{ts}** — 🤖 AI help at: {content.get('stage_name', '')}")
+                                st.caption(f"AI role: {content.get('ai_role', '?')}")
+                            elif et == "assignment_started":
+                                st.markdown(f"**{ts}** — 🚀 Started")
+                            else:
+                                st.markdown(f"**{ts}** — {et}")
+
+            elif current_stage:
+                stage = current_stage
+                policy = (stage.get("ai_policy") or "Red").strip()
+                stage_name = stage.get("stage_name", f"Stage {current_idx + 1}")
+
+                st.subheader(f"Working on: {stage_name}")
+
+                student_work = st.text_area(
+                    "Your work for this stage",
+                    height=200,
+                    key=f"work_{sub_id}_{current_idx}",
+                    placeholder="Write your work here…",
+                )
+
+                friction_answer = None
+                if stage.get("is_friction_point") and stage.get("friction_prompt"):
+                    st.markdown(f"**⚡ Justification required:** _{stage['friction_prompt']}_")
+                    friction_answer = st.text_area(
+                        "Your justification",
+                        height=100,
+                        key=f"friction_{sub_id}_{current_idx}",
+                        placeholder="Explain your reasoning…",
+                    )
+
+                col_submit, col_ai = st.columns(2)
+
+                with col_submit:
+                    if st.button("Submit Checkpoint", type="primary", key=f"submit_{current_idx}"):
+                        payload = {"student_work": student_work}
+                        if friction_answer:
+                            payload["friction_answer"] = friction_answer
+                        r = requests.post(
+                            f"{base()}/submissions/{sub_id}/checkpoint",
+                            json=payload,
+                            timeout=60,
+                        )
+                        if r.ok:
+                            d = r.json()
+                            if d.get("all_done"):
+                                st.success("🎉 All stages complete! Assignment submitted.")
+                            else:
+                                st.success(f"✅ '{d.get('completed_stage')}' submitted! Next: {d.get('next_stage')}")
+                            st.rerun()
+                        else:
+                            try:
+                                detail = r.json().get("detail", r.text)
+                            except Exception:
+                                detail = r.text
+                            st.error(f"Could not submit: {detail}")
+
+                with col_ai:
+                    if policy == "Red":
+                        st.button("🤖 Ask AI", disabled=True, key=f"ai_{current_idx}",
+                                  help="AI is not permitted at this stage.")
+                    else:
+                        ai_role = stage.get("ai_role", "learning coach")
+                        if st.button(f"🤖 Ask AI ({ai_role})", key=f"ai_{current_idx}"):
+                            if not student_work or len(student_work.strip()) < 30:
+                                st.warning("Brain-first: write your own work first (at least a few sentences) before asking AI.")
+                            else:
+                                with st.spinner(f"Asking AI ({ai_role})…"):
+                                    ar = requests.post(
+                                        f"{base()}/submissions/{sub_id}/ai-help",
+                                        json={"student_attempt": student_work},
+                                        timeout=120,
+                                    )
+                                if ar.ok:
+                                    ai_data = ar.json()
+                                    st.markdown(f"**🤖 {ai_data.get('ai_role', 'AI')} says:**")
+                                    st.info(ai_data.get("response", ""))
+                                    st.caption(ai_data.get("reminder", ""))
+                                else:
+                                    try:
+                                        detail = ar.json().get("detail", ar.text)
+                                        if isinstance(detail, dict):
+                                            detail = detail.get("error") or detail.get("reason") or str(detail)
+                                    except Exception:
+                                        detail = ar.text
+                                    st.error(f"AI help unavailable: {detail}")

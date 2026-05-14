@@ -7,62 +7,138 @@ from app.services.openai_client import get_openai_client
 PLANNING_MODEL = "gpt-4o"
 GENERATION_MODEL = "gpt-4o"
 
-DECISION_PROTOCOL_PROMPT = """You are an expert instructional designer following the "Student Use of AI in Assignments: A Decision Protocol for Instructors".
+# ─────────────────────────────────────────────────────────────
+# Prompt 1: Plan generation (teacher-facing)
+# Based on the 6-step Decision Protocol + "cognitively mandated
+# task brief" from the reference video.
+# ─────────────────────────────────────────────────────────────
 
-Given the selected textbook chunks (RAG context) and teacher inputs (learning objectives, scope), produce:
+DECISION_PROTOCOL_PROMPT = """You are an expert instructional designer. You follow two frameworks:
 
-1. A structured assignment plan following the 6 steps:
-   - Step 1: Primary Learning Objective(s)
-   - Step 2: Core Thinking/Skills students must do themselves (3-5 items)
-   - Step 3: Assignment Workflow (list of 4-7 major stages)
-   - Step 4-5: For each stage: potential AI offloading judgment + Red/Yellow/Green decision + guardrails/transparency
-   - Step 6: Student-facing AI guidance text
+A) The "Student Use of AI in Assignments: 6-Step Decision Protocol for Instructors":
+   Step 1 – Anchor in Learning Purpose (primary + optional secondary objectives)
+   Step 2 – Core Thinking / Skills students must do themselves (3-5 items)
+   Step 3 – Assignment Workflow (4-7 sequential stages)
+   Step 4 – For each stage: what thinking could AI offload? Is that productive, unproductive, or uncertain?
+   Step 5 – Red / Yellow / Green decision per stage + guardrails + transparency requirements
+   Step 6 – Student-facing AI guidance text
 
-2. A ready-to-use "downstream prompt template" that a generation model can use later to actually create the assignment instructions, rubric, etc.
+B) The "Cognitively Mandated Task Brief" approach:
+   - The assignment is a MULTI-STAGE PROCESS PIPELINE, not a single deliverable.
+   - Every stage has a CHECKPOINT: students must submit evidence at each stage before moving on.
+   - FRICTION POINTS: at least 2-3 stages must require students to justify a choice, defend a position, or address a conflicting perspective.
+   - PROCESS > PRODUCT: 60-70%% of marks come from process evidence (drafts, reasoning, justifications, reflections), only 30-40%% from the final output.
+   - AI is assigned a SPECIFIC ROLE at permitted stages (e.g., "critic", "brainstorm partner", "proofreader"), never open-ended.
+   - "Brain first, AI second": students always produce their own thinking BEFORE any AI interaction.
 
-Return ONLY valid JSON with keys:
+C) PLATFORM CONSTRAINTS — students complete the entire assignment ON-PLATFORM:
+   - All writing, drafts, and revisions happen inside the platform's editor.
+   - The platform records an append-only process log (keystrokes, drafts, timestamps).
+   - Students cannot paste in large externally-generated text; the platform tracks origin.
+   - Each stage checkpoint is submitted through the platform before the next stage unlocks.
+   - This means the assignment design should RELY on the platform's process tracking as a core integrity mechanism.
+
+Given the RAG context (textbook excerpts) and teacher inputs, produce a plan following ALL of the above.
+
+Return ONLY valid JSON with this exact structure:
 {{
-  "plan": {{ structured object matching the 6 steps }},
-  "prompt_template": "The full prompt string for future generation, including placeholders for {{topic}}, {{student_level}}, etc."
+  "plan": {{
+    "step1_learning_objectives": {{
+      "primary": "...",
+      "secondary": ["...", "..."]
+    }},
+    "step2_core_thinking": ["3-5 items students must do themselves"],
+    "step3_workflow": [
+      {{
+        "stage_number": 1,
+        "stage_name": "...",
+        "description": "what students do",
+        "is_checkpoint": true,
+        "checkpoint_deliverable": "what they submit at this stage",
+        "is_friction_point": false
+      }}
+    ],
+    "step4_5_ai_decisions": [
+      {{
+        "stage_name": "...",
+        "potential_offloading": "what AI could do here",
+        "offloading_judgment": "productive|unproductive|uncertain",
+        "ai_decision": "Red|Yellow|Green",
+        "ai_role": "specific role if Yellow/Green, otherwise null",
+        "guardrails": "specific guardrails if Yellow/Green",
+        "transparency_requirement": "what student must disclose"
+      }}
+    ],
+    "step6_student_guidance": "full student-facing AI policy text",
+    "grading_weight_split": {{
+      "process_percentage": 65,
+      "final_output_percentage": 35
+    }}
+  }},
+  "prompt_template": "The downstream prompt for generating the full assignment from this plan"
 }}
 
-RAG Context (selected textbook sections):
+RAG Context (textbook sections):
 {context}
 
 Teacher Inputs:
 - Title: {title}
 - Learning Objectives: {objectives}
-- Selected Scope: {scope}
-- Additional notes: {notes}
+- Scope: {scope}
+- Notes: {notes}
 """
 
-ASSIGNMENT_GENERATION_PROMPT = """You are generating a complete, ready-to-distribute assignment based on an approved plan.
+# ─────────────────────────────────────────────────────────────
+# Prompt 2: Final assignment generation (from approved plan)
+# ─────────────────────────────────────────────────────────────
 
-Use the approved plan (which includes learning objectives, workflow stages with AI policies, and guardrails) to produce:
+ASSIGNMENT_GENERATION_PROMPT = """You are generating a complete, ready-to-distribute assignment from an approved plan. The assignment will be completed entirely ON-PLATFORM by students.
 
-1. **Assignment title and description** (student-facing)
-2. **Detailed instructions** for each stage of the workflow
-3. **AI usage policy** per stage (Red = no AI, Yellow = AI with conditions, Green = AI allowed) with clear student-facing language
-4. **Rubric** tied to the learning objectives and stages
-5. **Submission requirements** (what students must hand in at each stage)
+CRITICAL DESIGN PRINCIPLES:
+1. PROCESS OVER PRODUCT — 60-70%% of the grade comes from process work (drafts, reasoning at checkpoints, justifications, reflections). Only 30-40%% from the final deliverable.
+2. MULTI-STAGE PIPELINE — Students move through sequential stages. Each stage has a checkpoint submission. They CANNOT skip ahead.
+3. FRICTION POINTS — Multiple stages require students to justify choices, address counterarguments, or explain their reasoning. These are where real learning happens.
+4. AI IS ASSIGNED A ROLE — At Yellow/Green stages, AI has a specific, bounded role (e.g., "Use AI as a critic of your draft" not "Use AI however you want").
+5. BRAIN FIRST — At any stage where AI is permitted, students must produce their own work FIRST, then interact with AI to test/refine/extend.
+6. ON-PLATFORM ONLY — All work is done in the platform editor. The platform tracks process logs, timestamps, and drafts. Students submit each checkpoint through the platform.
 
-Return ONLY valid JSON with keys:
+Generate the assignment using the approved plan.
+
+Return ONLY valid JSON:
 {{
   "title": "...",
-  "description": "...",
-  "instructions": [
+  "description": "student-facing overview (mention this is an on-platform assignment with stage-by-stage progression)",
+  "platform_notice": "Clear statement that all work must be completed on-platform, the platform records your process, and each stage must be submitted before the next unlocks.",
+  "stages": [
     {{
-      "stage": "stage name",
-      "instructions": "detailed instructions",
+      "stage_number": 1,
+      "stage_name": "...",
+      "instructions": "detailed student-facing instructions for this stage",
       "ai_policy": "Red|Yellow|Green",
-      "ai_guidance": "what students can/cannot do with AI here",
-      "deliverable": "what to submit for this stage"
+      "ai_guidance": "specific student-facing text: what they can/cannot do with AI, and WHY",
+      "ai_role": "if Yellow/Green: the specific role AI plays (e.g., 'brainstorm partner', 'critic'). If Red: null",
+      "brain_first_requirement": "what students must produce BEFORE any AI use (null if Red)",
+      "is_checkpoint": true,
+      "checkpoint_deliverable": "exactly what students submit at this stage",
+      "is_friction_point": true/false,
+      "friction_prompt": "if friction point: the specific justification question students must answer. null otherwise"
     }}
   ],
   "rubric": [
-    {{"criterion": "...", "weight": "...", "description": "..."}}
+    {{
+      "criterion": "...",
+      "weight_percentage": 15,
+      "category": "process|final_output",
+      "description": "what earns full marks"
+    }}
   ],
-  "ai_policy_summary": "overall student-facing AI guidance"
+  "grading_summary": {{
+    "process_total_percentage": 65,
+    "final_output_total_percentage": 35,
+    "explanation": "why process is weighted more heavily"
+  }},
+  "ai_policy_summary": "overall student-facing AI guidance with the learning rationale",
+  "integrity_note": "statement about how the platform's process log serves as evidence of authentic work"
 }}
 
 Approved Plan:
@@ -110,7 +186,7 @@ def generate_assignment_plan(
     scope_query: str,
     notes: str = "",
 ) -> Dict[str, Any]:
-    """Step 1: Generate the assignment design plan (RAG + Decision Protocol)."""
+    """Generate the assignment design plan (RAG + Decision Protocol + process-first)."""
     relevant_chunks = retrieve_relevant_chunks(db, book_id, scope_query)
     context_text = _build_context_text(relevant_chunks)
 
@@ -139,7 +215,7 @@ def generate_final_assignment(
     scope_query: str = "",
     notes: str = "",
 ) -> Dict[str, Any]:
-    """Step 2: Generate the actual assignment from the approved plan."""
+    """Generate the full assignment from the approved plan."""
     relevant_chunks = retrieve_relevant_chunks(db, book_id, scope_query) if scope_query else []
     context_text = _build_context_text(relevant_chunks) if relevant_chunks else "(no additional context)"
 

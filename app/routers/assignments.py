@@ -147,7 +147,7 @@ def generate_assignment(
         raise http_exception_from_openai(exc) from exc
 
     assignment.status = "published"
-    assignment.workflow_stages = result.get("instructions", [])
+    assignment.workflow_stages = result.get("stages") or result.get("instructions") or []
     db.add(assignment)
     db.commit()
     db.refresh(assignment)
