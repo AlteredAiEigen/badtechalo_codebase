@@ -5,6 +5,7 @@ __pycache__/
 .Python
 key
 .env
+app/.env
 *.pem
 .idea/
 .vscode/
