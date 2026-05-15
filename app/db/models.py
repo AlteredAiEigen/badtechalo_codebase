@@ -70,6 +70,8 @@ class Assignment(Base):
     status = Column(String, default="draft")  # draft, approved, published
     approved_plan = Column(JSON)  # the structured plan from LLM
     prompt_template = Column(Text)  # the downstream prompt for generation
+    # Chunk IDs used for plan-time RAG; final generation reuses these unless scope_query is sent again.
+    plan_rag_chunk_ids = Column(JSON, nullable=True)
     created_by = Column(String)  # teacher id or name for now
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

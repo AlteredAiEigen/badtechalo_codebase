@@ -9,6 +9,9 @@ from app.services.openai_client import get_openai_client
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 MAX_CHUNK_CHARS = 3000
+# OpenAI allows at most ~300k tokens summed per embeddings request; stay under with margin.
+_MAX_EMBED_BATCH_EST_TOKENS = 240_000
+_MAX_EMBED_BATCH_ITEMS = 512
 
 
 def split_text_into_chunks(text: str, page_num: int, max_chars: int = MAX_CHUNK_CHARS) -> List[Dict[str, str]]:
@@ -46,14 +49,41 @@ def split_text_into_chunks(text: str, page_num: int, max_chars: int = MAX_CHUNK_
     return chunks
 
 
+def _rough_token_estimate(text: str) -> int:
+    """Cheap length-based estimate (OpenAI batch limit is on total tokens)."""
+    return max(1, len(text) // 4)
+
+
 def embed_texts_batch(texts: List[str]) -> List[List[float]]:
-    """Embed all texts in a single API call."""
+    """Embed one API batch (caller must keep under OpenAI token + item limits)."""
     if not texts:
         return []
     client = get_openai_client()
     truncated = [t[:8000] for t in texts]
     resp = client.embeddings.create(model=EMBEDDING_MODEL, input=truncated)
     return [d.embedding for d in resp.data]
+
+
+def embed_texts_all(texts: List[str]) -> List[List[float]]:
+    """Embed many chunks using several API calls so total tokens stay under OpenAI limits."""
+    if not texts:
+        return []
+    all_embeddings: List[List[float]] = []
+    batch: List[str] = []
+    batch_est = 0
+    for t in texts:
+        est = _rough_token_estimate(t)
+        if batch and (
+            batch_est + est > _MAX_EMBED_BATCH_EST_TOKENS or len(batch) >= _MAX_EMBED_BATCH_ITEMS
+        ):
+            all_embeddings.extend(embed_texts_batch(batch))
+            batch = []
+            batch_est = 0
+        batch.append(t)
+        batch_est += est
+    if batch:
+        all_embeddings.extend(embed_texts_batch(batch))
+    return all_embeddings
 
 
 def process_book_chunks(
@@ -133,22 +163,22 @@ def process_book_chunks(
     if not all_chunks:
         return 0
 
-    # Step 2: embed all chunks in one batch call
+    # Step 2: embed chunks (several API calls; OpenAI caps total tokens per request)
+    texts = [c["content"] for c in all_chunks]
+    n_texts = len(texts)
     bump(
         phase="embedding",
         total_pages=total_pages,
         page_index=total_pages,
-        chunks_total=len(all_chunks),
-        message=f"Embedding {len(all_chunks)} chunk(s) in one batch call…",
+        chunks_total=n_texts,
+        message=f"Embedding {n_texts} chunk(s) in multiple API calls (token limits)…",
     )
 
-    texts = [c["content"] for c in all_chunks]
-    # OpenAI batch limit is ~2048 inputs; split if needed
-    BATCH_SIZE = 2000
-    all_embeddings: List[List[float]] = []
-    for i in range(0, len(texts), BATCH_SIZE):
-        batch = texts[i:i + BATCH_SIZE]
-        all_embeddings.extend(embed_texts_batch(batch))
+    all_embeddings = embed_texts_all(texts)
+    if len(all_embeddings) != len(texts):
+        raise RuntimeError(
+            f"Embedding count mismatch: expected {len(texts)} vectors, got {len(all_embeddings)}"
+        )
 
     # Step 3: store everything
     for ci, (chunk_data, embedding) in enumerate(zip(all_chunks, all_embeddings)):

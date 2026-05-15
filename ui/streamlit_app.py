@@ -46,11 +46,15 @@ with st.sidebar:
         st.error("No OpenAI key in app/.env")
 
     if st.button("Test OpenAI"):
-        ho = requests.get(f"{base()}/health/openai", timeout=60).json()
+        ho = requests.get(f"{base()}/health/openai", timeout=120).json()
         if ho.get("embeddings_ok") and ho.get("chat_ok"):
             st.success("OpenAI OK")
         else:
             st.error(ho.get("detail") or str(ho))
+            if ho.get("how_to_fix_connection"):
+                st.warning(ho["how_to_fix_connection"])
+            if ho.get("how_to_fix"):
+                st.info(ho["how_to_fix"])
 
 
 # ── Tabs ──
@@ -63,6 +67,93 @@ tab_teacher, tab_student = st.tabs(["Teacher — Design Assignment", "Student �
 # ============================================================
 
 with tab_teacher:
+
+    st.subheader("Select book")
+    st.caption(
+        "Rows show **database ID**, **PDF file name** (from the file you ingested), **title** (the name you typed at ingest), "
+        "then how many **chunks/embeddings** exist for RAG. The title is not taken from chunk text."
+    )
+
+    books_rows: list = []
+    books_list_error: str | None = None
+    try:
+        br = requests.get(f"{base()}/books/list", timeout=10)
+        if br.ok:
+            raw = br.json()
+            books_rows = raw if isinstance(raw, list) else []
+            if not isinstance(raw, list):
+                books_list_error = "Unexpected /books/list response (not a JSON list)."
+        else:
+            books_list_error = f"HTTP {br.status_code}: {br.text[:200]}"
+    except Exception as ex:
+        books_list_error = str(ex)
+    if books_list_error:
+        st.warning(books_list_error)
+
+    def _book_row_label(b: dict) -> str:
+        bid = int(b["id"])
+        pdf = str(b.get("pdf_filename") or "").strip() or str(b.get("source_id") or "?")
+        title = str(b.get("title") or "").replace("\n", " ").strip() or "(no ingest title)"
+        if len(title) > 40:
+            title = title[:39] + "…"
+        n = int(b.get("chunk_count") or 0)
+        ix = str(b.get("index_status") or "idle")
+        if n > 0:
+            emb = f"{n} chunks"
+        else:
+            emb = "0 chunks"
+        return f"ID {bid}  |  {pdf}  |  title: {title}  |  {emb}  |  index: {ix}"
+
+    c_refresh, c_meta = st.columns([1, 4])
+    with c_refresh:
+        if st.button("Refresh list", key="refresh_books_list"):
+            st.rerun()
+    if books_rows:
+        ids_all = [int(x["id"]) for x in books_rows]
+        with c_meta:
+            st.caption(f"**{len(books_rows)}** book(s) from API · highest ID **{max(ids_all)}**")
+
+    if books_rows:
+        n_rows = len(books_rows)
+        cur_bid = st.session_state.get("book_id")
+        cur_ids = [int(x["id"]) for x in books_rows]
+        default_ix = cur_ids.index(int(cur_bid)) if cur_bid is not None and int(cur_bid) in cur_ids else 0
+        default_ix = min(max(default_ix, 0), n_rows - 1)
+
+        pick_ix = st.selectbox(
+            "Books in backend (ID · PDF filename · ingest title · chunks)",
+            options=list(range(n_rows)),
+            index=default_ix,
+            format_func=lambda i: _book_row_label(books_rows[i]),
+            key="teacher_book_pick_ix",
+        )
+        picked_id = int(books_rows[pick_ix]["id"])
+        if st.button("Use selected book as current book_id", type="primary", key="teacher_apply_book"):
+            st.session_state["book_id"] = picked_id
+            st.success(f"Using book_id **{picked_id}** — Step 2 if not indexed; Step 3 when embeddings exist.")
+        st.caption(f"Current session `book_id`: `{st.session_state.get('book_id', '—')}`")
+
+        st.divider()
+        st.caption("Or set `book_id` by number:")
+        ex_bid = st.number_input(
+            "book_id (manual)",
+            min_value=1,
+            value=int(picked_id),
+            step=1,
+            key="existing_book_id_input",
+        )
+        if st.button("Use this book_id", key="use_existing_book_manual"):
+            st.session_state["book_id"] = int(ex_bid)
+            st.success(f"Set book_id={ex_bid}.")
+    else:
+        st.info("No books returned from the API yet — use Step 1 below to ingest a PDF (then refresh this page).")
+        st.divider()
+        ex_bid = st.number_input("book_id (manual only)", min_value=1, value=1, step=1, key="existing_book_id_input")
+        if st.button("Use this book_id", key="use_existing_book_manual"):
+            st.session_state["book_id"] = int(ex_bid)
+            st.success(f"Set book_id={ex_bid}.")
+
+    st.divider()
 
     # Step 1: Ingest
     st.header("Step 1 — Upload PDF")
@@ -103,7 +194,7 @@ with tab_teacher:
     # Step 2: Index
     st.header("Step 2 — Chunk + Embed")
     if "book_id" not in st.session_state:
-        st.info("Complete Step 1 first.")
+        st.info("Set book_id via **Select book** above or Step 1.")
     else:
         bid = st.session_state["book_id"]
         st.write(f"**book_id:** `{bid}`")
@@ -132,7 +223,7 @@ with tab_teacher:
     # Step 3: Generate plan
     st.header("Step 3 — Generate Plan")
     if "book_id" not in st.session_state:
-        st.info("Complete Steps 1-2 first.")
+        st.info("Set book_id (Step 1, or existing book expander). Step 2 only if the book is not indexed yet.")
     else:
         at = st.text_input("Assignment title", "Sample Assignment")
         obj = st.text_area("Learning objectives (one per line)", "Students apply concepts from the text.")
@@ -157,6 +248,7 @@ with tab_teacher:
                     data = pr.json()
                     st.session_state["assignment_id"] = data["assignment_id"]
                     st.session_state["plan"] = data.get("plan")
+                    st.session_state["plan_scope_query"] = scope.strip()
                     st.success(f"Plan generated in {elapsed:.1f}s — assignment_id={data['assignment_id']}")
                     st.json(data["plan"])
                 else:
@@ -202,13 +294,18 @@ with tab_teacher:
     else:
         aid = st.session_state["assignment_id"]
         extra_notes = st.text_area("Extra notes for generation", "", height=68, key="gen_notes")
+        rerag = st.checkbox(
+            "Re-run RAG retrieval (embeds scope query again). Leave off to reuse the same chunks as the plan.",
+            value=False,
+            key="rerag_final",
+        )
         if st.button("Generate Assignment", type="primary"):
             with st.spinner("Generating…"):
                 t0 = time.time()
-                r = requests.post(f"{base()}/assignments/{aid}/generate", json={
-                    "scope_query": scope if "scope" in dir() else "",
-                    "notes": extra_notes,
-                }, timeout=300)
+                gen_body: dict = {"notes": extra_notes}
+                if rerag:
+                    gen_body["scope_query"] = st.session_state.get("plan_scope_query") or ""
+                r = requests.post(f"{base()}/assignments/{aid}/generate", json=gen_body, timeout=300)
                 elapsed = time.time() - t0
             if r.ok:
                 data = r.json()

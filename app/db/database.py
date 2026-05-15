@@ -1,10 +1,35 @@
+from pathlib import Path
+
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
+
 from app.db.models import Base
 import os
 
-# Use SQLite for simplicity in v1
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./assignment_platform.db")
+# backend/app/db/database.py -> backend/
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
+
+
+def _resolve_database_url() -> str:
+    """
+    Default SQLite file is always next to the backend app (not the process cwd),
+    so uvicorn, Streamlit, and scripts see the same books regardless of launch directory.
+    Relative paths in DATABASE_URL are resolved against _BACKEND_DIR.
+    """
+    raw = (os.getenv("DATABASE_URL") or "").strip()
+    if not raw:
+        p = (_BACKEND_DIR / "assignment_platform.db").resolve()
+        return f"sqlite:///{p.as_posix()}"
+    if raw.startswith("sqlite:///"):
+        rest = raw[len("sqlite:///") :]
+        candidate = Path(rest)
+        if not candidate.is_absolute():
+            p = (_BACKEND_DIR / candidate).resolve()
+            return f"sqlite:///{p.as_posix()}"
+    return raw
+
+
+DATABASE_URL = _resolve_database_url()
 
 engine = create_engine(
     DATABASE_URL,
@@ -30,11 +55,18 @@ def migrate_sqlite_schema() -> None:
         alters.append("ALTER TABLE books ADD COLUMN index_progress TEXT")
     if "index_error" not in existing:
         alters.append("ALTER TABLE books ADD COLUMN index_error TEXT")
-    if not alters:
+    if alters:
+        with engine.begin() as conn:
+            for sql in alters:
+                conn.execute(text(sql))
+
+    tables = insp.get_table_names()
+    if "assignments" not in tables:
         return
+    acols = {c["name"] for c in insp.get_columns("assignments")}
     with engine.begin() as conn:
-        for sql in alters:
-            conn.execute(text(sql))
+        if "plan_rag_chunk_ids" not in acols:
+            conn.execute(text("ALTER TABLE assignments ADD COLUMN plan_rag_chunk_ids TEXT"))
 
 
 def get_db():

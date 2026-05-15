@@ -48,6 +48,17 @@ def health_config():
     }
 
 
+def _connection_troubleshooting_hint() -> str:
+    return (
+        "Could not reach api.openai.com reliably (network or TLS). "
+        "Try in order: (1) VPN/firewall allows HTTPS to api.openai.com. "
+        "(2) Restart uvicorn after saving app/.env — the API client uses the OS certificate store by default. "
+        "(3) Corporate proxy: set HTTPS_PROXY (and HTTP_PROXY if needed). "
+        "(4) Custom CA bundle: set SSL_CERT_FILE to your org root PEM. "
+        "(5) Dev-only workaround: OPENAI_INSECURE_SSL=1 in app/.env (disables TLS verification; remove for production)."
+    )
+
+
 @app.get("/health/openai")
 def health_openai():
     """
@@ -103,7 +114,41 @@ def health_openai():
                 "OPENAI_KEY=sk-... or OPENAI_API_KEY=sk-... , save, then restart uvicorn. "
                 "If you ever pasted a key in chat or committed it, assume it is compromised and rotate."
             )
+        if any(
+            w in err
+            for w in (
+                "connection",
+                "connect",
+                "timeout",
+                "ssl",
+                "tls",
+                "certificate",
+                "10060",
+                "10054",
+                "refused",
+                "unreachable",
+            )
+        ):
+            result["how_to_fix_connection"] = _connection_troubleshooting_hint()
     except Exception as exc:  # noqa: BLE001
         result["detail"] = f"{type(exc).__name__}: {exc}"
+        low = result["detail"].lower()
+        if any(
+            w in low
+            for w in (
+                "connection",
+                "connect",
+                "ssl",
+                "certificate",
+                "tls",
+                "timed out",
+                "timeout",
+                "10060",
+                "10054",
+                "refused",
+                "unreachable",
+            )
+        ):
+            result["how_to_fix_connection"] = _connection_troubleshooting_hint()
 
     return result

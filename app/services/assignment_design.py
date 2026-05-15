@@ -1,5 +1,5 @@
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from app.db.models import Chunk
 from app.services.openai_client import get_openai_client
@@ -172,6 +172,19 @@ def retrieve_relevant_chunks(db: Session, book_id: int, query: str, top_k: int =
     return [c[0] for c in scored[:top_k]]
 
 
+def retrieve_chunks_by_ids(db: Session, book_id: int, chunk_ids: List[int]) -> List[Chunk]:
+    """Load chunks by primary key in the given order (same book only)."""
+    if not chunk_ids:
+        return []
+    rows = (
+        db.query(Chunk)
+        .filter(Chunk.book_id == book_id, Chunk.id.in_(chunk_ids))
+        .all()
+    )
+    by_id = {c.id: c for c in rows}
+    return [by_id[i] for i in chunk_ids if i in by_id]
+
+
 def _build_context_text(chunks: List[Chunk]) -> str:
     return "\n\n---\n\n".join(
         f"Topic: {c.topic}\nPage: {c.page_start}\n{c.text[:1200]}" for c in chunks
@@ -205,7 +218,12 @@ def generate_assignment_plan(
         response_format={"type": "json_object"},
     )
 
-    return json.loads(resp.choices[0].message.content)
+    llm_out = json.loads(resp.choices[0].message.content)
+    return {
+        "plan": llm_out.get("plan"),
+        "prompt_template": llm_out.get("prompt_template"),
+        "rag_chunk_ids": [c.id for c in relevant_chunks],
+    }
 
 
 def generate_final_assignment(
@@ -214,9 +232,16 @@ def generate_final_assignment(
     approved_plan: dict,
     scope_query: str = "",
     notes: str = "",
+    *,
+    plan_rag_chunk_ids: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """Generate the full assignment from the approved plan."""
-    relevant_chunks = retrieve_relevant_chunks(db, book_id, scope_query) if scope_query else []
+    if scope_query.strip():
+        relevant_chunks = retrieve_relevant_chunks(db, book_id, scope_query)
+    elif plan_rag_chunk_ids:
+        relevant_chunks = retrieve_chunks_by_ids(db, book_id, plan_rag_chunk_ids)
+    else:
+        relevant_chunks = []
     context_text = _build_context_text(relevant_chunks) if relevant_chunks else "(no additional context)"
 
     prompt = ASSIGNMENT_GENERATION_PROMPT.format(

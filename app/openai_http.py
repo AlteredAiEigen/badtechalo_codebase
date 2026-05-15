@@ -34,10 +34,16 @@ def http_exception_from_openai(exc: BaseException) -> HTTPException:  # noqa: BL
             detail={"message": "OpenAI rate limit.", "error": str(exc)},
         )
     if isinstance(exc, APIStatusError):
-        return HTTPException(
-            status_code=502,
-            detail={"message": "OpenAI API error.", "error": str(exc)},
-        )
+        sc = getattr(exc, "status_code", None) or 502
+        detail = {
+            "message": "OpenAI API returned an error (often token limits, bad request, or upstream outage).",
+            "openai_status": sc,
+            "error": str(exc),
+        }
+        # Surface 4xx from OpenAI as 4xx to clients so UIs are not misled as "Bad Gateway"
+        if isinstance(sc, int) and 400 <= sc < 500:
+            return HTTPException(status_code=sc, detail=detail)
+        return HTTPException(status_code=502, detail=detail)
     if isinstance(exc, OpenAIError):
         return HTTPException(
             status_code=502,

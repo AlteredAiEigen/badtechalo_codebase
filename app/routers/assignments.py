@@ -26,7 +26,8 @@ class ApprovalPayload(BaseModel):
 
 
 class GeneratePayload(BaseModel):
-    scope_query: Optional[str] = ""
+    """Omit ``scope_query`` (or send null/empty) to reuse plan-time RAG chunks — no extra embedding call."""
+    scope_query: Optional[str] = None
     notes: Optional[str] = ""
 
 
@@ -61,6 +62,7 @@ def generate_plan(
         status="draft",
         approved_plan=result.get("plan"),
         prompt_template=result.get("prompt_template"),
+        plan_rag_chunk_ids=result.get("rag_chunk_ids") or None,
     )
     db.add(assignment)
     db.commit()
@@ -71,6 +73,7 @@ def generate_plan(
         "status": "draft",
         "plan": result.get("plan"),
         "prompt_template": result.get("prompt_template"),
+        "rag_chunk_ids": result.get("rag_chunk_ids") or [],
         "next_step": f"Review the plan, then POST /assignments/{assignment.id}/approve",
     }
 
@@ -135,13 +138,16 @@ def generate_assignment(
     if not assignment.approved_plan:
         raise HTTPException(400, "No approved plan found. Generate a plan first.")
 
+    scope_q = (payload.scope_query or "").strip()
+
     try:
         result = generate_final_assignment(
             db,
             assignment.book_id,
             assignment.approved_plan,
-            scope_query=payload.scope_query or "",
+            scope_query=scope_q,
             notes=payload.notes or "",
+            plan_rag_chunk_ids=assignment.plan_rag_chunk_ids,
         )
     except OpenAIError as exc:
         raise http_exception_from_openai(exc) from exc
@@ -178,4 +184,5 @@ def get_assignment(
         "approved_plan": assignment.approved_plan,
         "prompt_template": assignment.prompt_template,
         "workflow_stages": assignment.workflow_stages,
+        "plan_rag_chunk_ids": assignment.plan_rag_chunk_ids,
     }

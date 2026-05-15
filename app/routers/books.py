@@ -1,15 +1,16 @@
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from openai import OpenAIError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config_env import REPO_ROOT, get_openai_key, load_all_dotenv
 from app.db.database import get_db
-from app.db.models import Book
+from app.db.models import Book, Chunk
 from app.openai_http import http_exception_from_openai
 from app.services.indexing_job import run_book_indexing
 from app.services.ingestion import ingest_book
@@ -88,6 +89,33 @@ async def upload_book(
         "status": "extracted",
         "message": "PDF extracted and saved. Call POST /books/{book_id}/index to chunk + embed with OpenAI.",
     }
+
+
+@router.get("/list", response_model=List[dict[str, Any]])
+def list_books(db: Session = Depends(get_db)):
+    """All books in the database (for UIs): id, title, index status, chunk counts for embedding/RAG."""
+    rows = db.query(Book).order_by(Book.id.asc()).all()
+    count_rows = db.query(Chunk.book_id, func.count(Chunk.id)).group_by(Chunk.book_id).all()
+    chunk_count_by_book = {int(bid): int(n) for bid, n in count_rows}
+    out: List[dict[str, Any]] = []
+    for b in rows:
+        nchunks = chunk_count_by_book.get(int(b.id), 0)
+        ix = b.index_status or "idle"
+        pdf_name = Path(b.source_pdf_path).name if b.source_pdf_path else ""
+        out.append(
+            {
+                "id": b.id,
+                "title": b.title,
+                "pdf_filename": pdf_name,
+                "source_id": b.source_id,
+                "extraction_status": b.extraction_status,
+                "index_status": ix,
+                "page_count": b.page_count,
+                "chunk_count": nchunks,
+                "embeddings_ready": nchunks > 0 and ix == "completed",
+            }
+        )
+    return out
 
 
 @router.get("/{book_id}/index-status", response_model=dict)
