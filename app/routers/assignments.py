@@ -15,8 +15,12 @@ class AssignmentCreate(BaseModel):
     book_id: int
     title: str
     learning_objectives: List[str]
-    scope_query: str
+    scope_query: str = ""
     notes: Optional[str] = ""
+    # Chapter JSON (default): whole chapter or selected topic_ids from GET /content/chapter
+    use_chapter_content: bool = True
+    whole_chapter: bool = False
+    chapter_topic_ids: Optional[List[str]] = None
 
 
 class ApprovalPayload(BaseModel):
@@ -44,13 +48,25 @@ def generate_plan(
         raise HTTPException(404, "Book not found")
 
     try:
+        if payload.use_chapter_content:
+            if not payload.whole_chapter and not (payload.chapter_topic_ids or []):
+                raise HTTPException(
+                    400,
+                    "Select whole_chapter=true or provide chapter_topic_ids (from GET /content/chapter).",
+                )
+        elif not (payload.scope_query or "").strip():
+            raise HTTPException(400, "scope_query is required when use_chapter_content=false.")
+
         result = generate_assignment_plan(
             db,
             payload.book_id,
             payload.title,
             payload.learning_objectives,
-            payload.scope_query,
+            payload.scope_query or "",
             payload.notes or "",
+            use_chapter_content=payload.use_chapter_content,
+            whole_chapter=payload.whole_chapter,
+            chapter_topic_ids=payload.chapter_topic_ids,
         )
     except OpenAIError as exc:
         raise http_exception_from_openai(exc) from exc
@@ -63,6 +79,9 @@ def generate_plan(
         approved_plan=result.get("plan"),
         prompt_template=result.get("prompt_template"),
         plan_rag_chunk_ids=result.get("rag_chunk_ids") or None,
+        chapter_topic_ids=result.get("chapter_topic_ids"),
+        chapter_whole=bool(result.get("chapter_whole")),
+        content_source=result.get("content_source") or "chapter_json",
     )
     db.add(assignment)
     db.commit()
@@ -74,6 +93,9 @@ def generate_plan(
         "plan": result.get("plan"),
         "prompt_template": result.get("prompt_template"),
         "rag_chunk_ids": result.get("rag_chunk_ids") or [],
+        "content_source": result.get("content_source"),
+        "chapter_topic_ids": result.get("chapter_topic_ids"),
+        "scope_label": result.get("scope_label"),
         "next_step": f"Review the plan, then POST /assignments/{assignment.id}/approve",
     }
 
@@ -148,6 +170,9 @@ def generate_assignment(
             scope_query=scope_q,
             notes=payload.notes or "",
             plan_rag_chunk_ids=assignment.plan_rag_chunk_ids,
+            content_source=assignment.content_source or "chapter_json",
+            chapter_topic_ids=assignment.chapter_topic_ids,
+            whole_chapter=bool(getattr(assignment, "chapter_whole", True)),
         )
     except OpenAIError as exc:
         raise http_exception_from_openai(exc) from exc
@@ -185,4 +210,7 @@ def get_assignment(
         "prompt_template": assignment.prompt_template,
         "workflow_stages": assignment.workflow_stages,
         "plan_rag_chunk_ids": assignment.plan_rag_chunk_ids,
+        "chapter_topic_ids": assignment.chapter_topic_ids,
+        "chapter_whole": getattr(assignment, "chapter_whole", None),
+        "content_source": assignment.content_source,
     }

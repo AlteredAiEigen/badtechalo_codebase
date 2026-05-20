@@ -2,6 +2,7 @@ import json
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from app.db.models import Chunk
+from app.services.chapter_content import chapter_context_for_scope
 from app.services.openai_client import get_openai_client
 
 PLANNING_MODEL = "gpt-4o"
@@ -198,16 +199,34 @@ def generate_assignment_plan(
     learning_objectives: List[str],
     scope_query: str,
     notes: str = "",
+    *,
+    use_chapter_content: bool = True,
+    whole_chapter: bool = False,
+    chapter_topic_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Generate the assignment design plan (RAG + Decision Protocol + process-first)."""
-    relevant_chunks = retrieve_relevant_chunks(db, book_id, scope_query)
-    context_text = _build_context_text(relevant_chunks)
+    """Generate the assignment design plan (chapter JSON or RAG chunks + Decision Protocol)."""
+    content_source = "chapter_json"
+    rag_chunk_ids: List[int] = []
+    selected_topic_ids: Optional[List[str]] = None
+    scope_label = scope_query
+
+    if use_chapter_content:
+        context_text, selected_topic_ids, scope_label = chapter_context_for_scope(
+            whole_chapter=whole_chapter,
+            topic_ids=chapter_topic_ids,
+            scope_query=scope_query,
+        )
+    else:
+        content_source = "rag_chunks"
+        relevant_chunks = retrieve_relevant_chunks(db, book_id, scope_query)
+        context_text = _build_context_text(relevant_chunks)
+        rag_chunk_ids = [c.id for c in relevant_chunks]
 
     prompt = DECISION_PROTOCOL_PROMPT.format(
         context=context_text[:12000],
         title=title,
         objectives=json.dumps(learning_objectives),
-        scope=scope_query,
+        scope=scope_label,
         notes=notes,
     )
 
@@ -219,10 +238,18 @@ def generate_assignment_plan(
     )
 
     llm_out = json.loads(resp.choices[0].message.content)
+    stored_topic_ids = None
+    if use_chapter_content and not whole_chapter:
+        stored_topic_ids = selected_topic_ids
+
     return {
         "plan": llm_out.get("plan"),
         "prompt_template": llm_out.get("prompt_template"),
-        "rag_chunk_ids": [c.id for c in relevant_chunks],
+        "rag_chunk_ids": rag_chunk_ids,
+        "content_source": content_source,
+        "chapter_topic_ids": stored_topic_ids,
+        "chapter_whole": bool(use_chapter_content and whole_chapter),
+        "scope_label": scope_label,
     }
 
 
@@ -234,15 +261,25 @@ def generate_final_assignment(
     notes: str = "",
     *,
     plan_rag_chunk_ids: Optional[List[int]] = None,
+    content_source: str = "chapter_json",
+    chapter_topic_ids: Optional[List[str]] = None,
+    whole_chapter: bool = False,
 ) -> Dict[str, Any]:
     """Generate the full assignment from the approved plan."""
-    if scope_query.strip():
+    if content_source == "chapter_json":
+        context_text, _, _ = chapter_context_for_scope(
+            whole_chapter=whole_chapter or not (chapter_topic_ids or []),
+            topic_ids=chapter_topic_ids,
+            scope_query=scope_query,
+        )
+    elif scope_query.strip():
         relevant_chunks = retrieve_relevant_chunks(db, book_id, scope_query)
+        context_text = _build_context_text(relevant_chunks)
     elif plan_rag_chunk_ids:
         relevant_chunks = retrieve_chunks_by_ids(db, book_id, plan_rag_chunk_ids)
+        context_text = _build_context_text(relevant_chunks)
     else:
-        relevant_chunks = []
-    context_text = _build_context_text(relevant_chunks) if relevant_chunks else "(no additional context)"
+        context_text = "(no additional context)"
 
     prompt = ASSIGNMENT_GENERATION_PROMPT.format(
         plan=json.dumps(approved_plan, indent=2),

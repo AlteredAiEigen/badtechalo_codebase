@@ -220,36 +220,114 @@ with tab_teacher:
 
     st.divider()
 
-    # Step 3: Generate plan
+    # Step 3: Generate plan (from curated chapter.json)
     st.header("Step 3 — Generate Plan")
+    st.caption(
+        "Assignments use **chapter.json** (`app/data/chapter.json`). Choose the whole chapter or specific topics, "
+        "then the same approve → generate flow as before."
+    )
     if "book_id" not in st.session_state:
-        st.info("Set book_id (Step 1, or existing book expander). Step 2 only if the book is not indexed yet.")
+        st.info("Set book_id (Step 1, or existing book expander). Chapter content does not require PDF indexing.")
     else:
-        at = st.text_input("Assignment title", "Sample Assignment")
-        obj = st.text_area("Learning objectives (one per line)", "Students apply concepts from the text.")
-        scope = st.text_input("Scope / retrieval query", "opening chapter concepts")
+        chapter_meta = {}
+        chapter_topics: list = []
+        ch_err = None
+        try:
+            cr = requests.get(f"{base()}/content/chapter", timeout=15)
+            if cr.ok:
+                ch = cr.json()
+                chapter_meta = ch.get("metadata") or {}
+                chapter_topics = ch.get("topics") or []
+            else:
+                ch_err = f"HTTP {cr.status_code}: {cr.text[:300]}"
+        except Exception as ex:
+            ch_err = str(ex)
+
+        if ch_err:
+            st.error(f"Could not load chapter.json: {ch_err}")
+        elif chapter_meta:
+            cn = chapter_meta.get("chapter_name") or "Chapter"
+            num = chapter_meta.get("chapter_number")
+            st.info(f"**{cn}** (Ch. {num}) — {len(chapter_topics)} topic(s) available")
+
+        at = st.text_input("Assignment title", "Diversity in the Living World — Assignment")
+        obj = st.text_area(
+            "Learning objectives (one per line)",
+            "Students explain biodiversity and grouping of plants and animals.\n"
+            "Students connect textbook concepts to observations from nature walks.",
+        )
+        scope_note = st.text_input(
+            "Optional focus note (added to scope label)",
+            "",
+            help="e.g. emphasize adaptations and habitats",
+        )
         notes = st.text_area("Teacher notes", "", height=68)
+
+        use_legacy_rag = st.checkbox(
+            "Use PDF chunk RAG instead of chapter.json (requires indexed book)",
+            value=False,
+            key="use_legacy_rag",
+        )
+        whole_chapter = True
+        selected_topic_ids: list[str] = []
+        if not use_legacy_rag and chapter_topics:
+            scope_mode = st.radio(
+                "Chapter scope",
+                ["Whole chapter", "Selected topics"],
+                horizontal=True,
+                key="chapter_scope_mode",
+            )
+            whole_chapter = scope_mode == "Whole chapter"
+            if not whole_chapter:
+                labels = {
+                    t["topic_id"]: f"{t['topic_id']} — {t['topic_name']}"
+                    for t in chapter_topics
+                    if t.get("topic_id")
+                }
+                selected_topic_ids = st.multiselect(
+                    "Topics to include",
+                    options=list(labels.keys()),
+                    format_func=lambda tid: labels.get(tid, tid),
+                    key="chapter_topic_pick",
+                )
+                for t in chapter_topics:
+                    if t["topic_id"] in selected_topic_ids and t.get("preview"):
+                        st.caption(f"**{t['topic_name']}:** {t['preview']}")
+        elif use_legacy_rag:
+            st.text_input("Scope / retrieval query (embeddings)", "opening chapter concepts", key="legacy_scope")
+
         if st.button("Generate Plan", type="primary"):
             objectives = [x.strip() for x in obj.split("\n") if x.strip()]
             if not objectives:
                 st.error("Add at least one learning objective.")
-            elif not scope.strip():
-                st.error("Scope cannot be empty.")
+            elif use_legacy_rag and not (st.session_state.get("legacy_scope") or "").strip():
+                st.error("Scope query is required for PDF RAG mode.")
+            elif not use_legacy_rag and not whole_chapter and not selected_topic_ids:
+                st.error("Select at least one topic, or choose Whole chapter.")
             else:
+                body = {
+                    "book_id": st.session_state["book_id"],
+                    "title": at.strip(),
+                    "learning_objectives": objectives,
+                    "scope_query": scope_note.strip() if not use_legacy_rag else st.session_state.get("legacy_scope", "").strip(),
+                    "notes": notes,
+                    "use_chapter_content": not use_legacy_rag,
+                    "whole_chapter": whole_chapter,
+                    "chapter_topic_ids": selected_topic_ids if not whole_chapter else None,
+                }
                 with st.spinner("Generating plan…"):
                     t0 = time.time()
-                    pr = requests.post(f"{base()}/assignments/generate-plan", json={
-                        "book_id": st.session_state["book_id"],
-                        "title": at.strip(), "learning_objectives": objectives,
-                        "scope_query": scope.strip(), "notes": notes,
-                    }, timeout=300)
+                    pr = requests.post(f"{base()}/assignments/generate-plan", json=body, timeout=300)
                     elapsed = time.time() - t0
                 if pr.ok:
                     data = pr.json()
                     st.session_state["assignment_id"] = data["assignment_id"]
                     st.session_state["plan"] = data.get("plan")
-                    st.session_state["plan_scope_query"] = scope.strip()
+                    st.session_state["plan_scope_label"] = data.get("scope_label") or scope_note
+                    st.session_state["content_source"] = data.get("content_source")
                     st.success(f"Plan generated in {elapsed:.1f}s — assignment_id={data['assignment_id']}")
+                    if data.get("scope_label"):
+                        st.caption(data["scope_label"])
                     st.json(data["plan"])
                 else:
                     st.error(f"{pr.status_code}: {pr.text}")
@@ -294,17 +372,22 @@ with tab_teacher:
     else:
         aid = st.session_state["assignment_id"]
         extra_notes = st.text_area("Extra notes for generation", "", height=68, key="gen_notes")
-        rerag = st.checkbox(
-            "Re-run RAG retrieval (embeds scope query again). Leave off to reuse the same chunks as the plan.",
-            value=False,
-            key="rerag_final",
-        )
+        src = st.session_state.get("content_source") or "chapter_json"
+        rerag = False
+        if src == "rag_chunks":
+            rerag = st.checkbox(
+                "Re-run RAG retrieval (embeds scope query again). Leave off to reuse plan chunks.",
+                value=False,
+                key="rerag_final",
+            )
+        else:
+            st.caption("Final assignment reuses the same chapter/topic selection from the plan.")
         if st.button("Generate Assignment", type="primary"):
             with st.spinner("Generating…"):
                 t0 = time.time()
                 gen_body: dict = {"notes": extra_notes}
                 if rerag:
-                    gen_body["scope_query"] = st.session_state.get("plan_scope_query") or ""
+                    gen_body["scope_query"] = st.session_state.get("plan_scope_label") or ""
                 r = requests.post(f"{base()}/assignments/{aid}/generate", json=gen_body, timeout=300)
                 elapsed = time.time() - t0
             if r.ok:

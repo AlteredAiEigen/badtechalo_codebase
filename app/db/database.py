@@ -67,6 +67,12 @@ def migrate_sqlite_schema() -> None:
     with engine.begin() as conn:
         if "plan_rag_chunk_ids" not in acols:
             conn.execute(text("ALTER TABLE assignments ADD COLUMN plan_rag_chunk_ids TEXT"))
+        if "chapter_topic_ids" not in acols:
+            conn.execute(text("ALTER TABLE assignments ADD COLUMN chapter_topic_ids TEXT"))
+        if "content_source" not in acols:
+            conn.execute(text("ALTER TABLE assignments ADD COLUMN content_source VARCHAR(32) DEFAULT 'chapter_json'"))
+        if "chapter_whole" not in acols:
+            conn.execute(text("ALTER TABLE assignments ADD COLUMN chapter_whole BOOLEAN DEFAULT 1"))
 
 
 def get_db():

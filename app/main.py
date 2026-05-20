@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from openai import OpenAIError
 
 from app.db.database import init_db
-from app.routers import assignments, books, submissions
+from app.routers import assignments, books, content, submissions
 from app.services.openai_client import get_openai_client
 
 app = FastAPI(title="AI-Aware Assignment Platform API", version="0.1.0")
@@ -18,6 +18,7 @@ def on_startup():
 
 
 app.include_router(books.router)
+app.include_router(content.router)
 app.include_router(assignments.router)
 app.include_router(submissions.router)
 

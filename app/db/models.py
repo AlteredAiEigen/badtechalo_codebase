@@ -72,6 +72,10 @@ class Assignment(Base):
     prompt_template = Column(Text)  # the downstream prompt for generation
     # Chunk IDs used for plan-time RAG; final generation reuses these unless scope_query is sent again.
     plan_rag_chunk_ids = Column(JSON, nullable=True)
+    # Manually curated chapter.json: "full" or list of topic_id strings (e.g. "2.1", "2.2").
+    chapter_topic_ids = Column(JSON, nullable=True)  # null = whole chapter when content_source is chapter_json
+    chapter_whole = Column(Boolean, default=True)
+    content_source = Column(String(32), default="chapter_json")  # chapter_json | rag_chunks
     created_by = Column(String)  # teacher id or name for now
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
