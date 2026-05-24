@@ -14,79 +14,85 @@ GENERATION_MODEL = "gpt-4o"
 # task brief" from the reference video.
 # ─────────────────────────────────────────────────────────────
 
-DECISION_PROTOCOL_PROMPT = """You are an expert instructional designer. You follow two frameworks:
+DECISION_PROTOCOL_PROMPT = """
+You are an expert in educational designer. You will be given topic content (extracted from a textbook via RAG)/
+Your task is to create a creative. orginal assignment for studetns that:
+1. is fully based on the provided topic content only,
+2. does not invent facts beyond that content,
+3. is not the same as textbook exercises or examples,
+4. is creative, engaging, and different from a standard worksheet,
+5. is appropriate for the given grade level and subject,
+6. can be completed in the given time,
+7. is practical for classroom or home use.
 
-A) The "Student Use of AI in Assignments: 6-Step Decision Protocol for Instructors":
-   Step 1 – Anchor in Learning Purpose (primary + optional secondary objectives)
-   Step 2 – Core Thinking / Skills students must do themselves (3-5 items)
-   Step 3 – Assignment Workflow (4-7 sequential stages)
-   Step 4 – For each stage: what thinking could AI offload? Is that productive, unproductive, or uncertain?
-   Step 5 – Red / Yellow / Green decision per stage + guardrails + transparency requirements
-   Step 6 – Student-facing AI guidance text
+Instructions
+1. Read the provided topic content carefully.
+2. Identify the main learning goals from that content.
+3. Design a creative assignment that: 
+  1. uses only the concepts, examples, and ideas present in the provided content,
+  2. does not add new facts or outside information,
+  3. does not copy textbook questions or tasks,
+  4. focuses on understanding, applying, analyzing, comparing, classifying, creating, or reflecting,
+  5. includes 4 to 6 clear steps,
+  6. feels like a mission, game, challenge, story, investigation, or project.
+  7. forces the assignment to be 100% online/computer-based,
+  8. uses online research, digital tools, and web resources,
+  9. avoids any requirement for physical collection, field trips, or real samples,
 
-B) The "Cognitively Mandated Task Brief" approach:
-   - The assignment is a MULTI-STAGE PROCESS PIPELINE, not a single deliverable.
-   - Every stage has a CHECKPOINT: students must submit evidence at each stage before moving on.
-   - FRICTION POINTS: at least 2-3 stages must require students to justify a choice, defend a position, or address a conflicting perspective.
-   - PROCESS > PRODUCT: 60-70%% of marks come from process evidence (drafts, reasoning, justifications, reflections), only 30-40%% from the final output.
-   - AI is assigned a SPECIFIC ROLE at permitted stages (e.g., "critic", "brainstorm partner", "proofreader"), never open-ended.
-   - "Brain first, AI second": students always produce their own thinking BEFORE any AI interaction.
+Rules
+Do not use generic tasks like “write answers,” “fill in blanks,” or “make notes” as the main task.
+Create a creative title for the assignment.
+Use 4–6 short, student-friendly steps.
+Include at least one fun element and  not always use the same theme , You must not always use the same theme:
+explorer / adventure, scientist / lab researcher,journalist / reporter,game designer,inventor / engineer,
+documentary filmmaker,museum curator,podcast host,storyteller / author,eco-activist / conservationist,
+competition/challenge host,or any other creative, age-appropriate role.
 
-C) PLATFORM CONSTRAINTS — students complete the entire assignment ON-PLATFORM:
-   - All writing, drafts, and revisions happen inside the platform's editor.
-   - The platform records an append-only process log (keystrokes, drafts, timestamps).
-   - Students cannot paste in large externally-generated text; the platform tracks origin.
-   - Each stage checkpoint is submitted through the platform before the next stage unlocks.
-   - This means the assignment design should RELY on the platform's process tracking as a core integrity mechanism.
+Clearly state what students must submit at the end.
+Clearly state how the teacher can assess the assignment.
+Do not include any content that is not supported by the provided topic text.
+Do not include subject-specific examples in the prompt itself; keep everything generic and adaptable.
+Quality check before finalizing
 
-Given the RAG context (textbook excerpts) and teacher inputs, produce a plan following ALL of the above.
+Before outputting the assignment, verify:
+1. all tasks are based only on the provided topic content,
+2. no facts are invented or assumed from outside,
+3. the assignment is different from textbook exercises,
+4. the assignment is age-appropriate,
+5. instructions are clear and not confusing,
+6. the assignment is feasible within the given time.
 
-Return ONLY valid JSON with this exact structure:
+Output format
+You must return only a valid JSON object with the following structure:
 {{
-  "plan": {{
-    "step1_learning_objectives": {{
-      "primary": "...",
-      "secondary": ["...", "..."]
-    }},
-    "step2_core_thinking": ["3-5 items students must do themselves"],
-    "step3_workflow": [
-      {{
-        "stage_number": 1,
-        "stage_name": "...",
-        "description": "what students do",
-        "is_checkpoint": true,
-        "checkpoint_deliverable": "what they submit at this stage",
-        "is_friction_point": false
-      }}
-    ],
-    "step4_5_ai_decisions": [
-      {{
-        "stage_name": "...",
-        "potential_offloading": "what AI could do here",
-        "offloading_judgment": "productive|unproductive|uncertain",
-        "ai_decision": "Red|Yellow|Green",
-        "ai_role": "specific role if Yellow/Green, otherwise null",
-        "guardrails": "specific guardrails if Yellow/Green",
-        "transparency_requirement": "what student must disclose"
-      }}
-    ],
-    "step6_student_guidance": "full student-facing AI policy text",
-    "grading_weight_split": {{
-      "process_percentage": 65,
-      "final_output_percentage": 35
+  "assignment_title": "string",
+  "concept_explanation": "string",
+  "theme_used": "string",
+  "steps": [
+    {{
+      "step_number": 1,
+      "title": "string",
+      "instruction": "string"
     }}
-  }},
-  "prompt_template": "The downstream prompt for generating the full assignment from this plan"
+  ],
+  "final_student_output": "string",
+  "teacher_assessment_focus": "string",
+  "bonus_twist": "string"
 }}
 
-RAG Context (textbook sections):
-{context}
+All fields must be filled. The steps array must contain 4 to 6 step objects.
 
-Teacher Inputs:
-- Title: {title}
-- Learning Objectives: {objectives}
-- Scope: {scope}
-- Notes: {notes}
+Input fields
+Topic: [INSERT TOPIC]
+Grade level: [INSERT GRADE]
+Subject: [INSERT SUBJECT]
+Difficulty level: [easy / medium / advanced]
+Time available: [e.g., 30 minutes, 1 class period, 1 week]
+Individual or group: [individual / pair / group]
+Materials allowed: [e.g., pencil, paper, phone, internet, craft supplies, etc.]
+Tone: [creative, playful, serious, investigative, storytelling, etc.]
+
+Topic content (textbook sections):{context}
 """
 
 # ─────────────────────────────────────────────────────────────
@@ -241,6 +247,8 @@ def generate_assignment_plan(
     stored_topic_ids = None
     if use_chapter_content and not whole_chapter:
         stored_topic_ids = selected_topic_ids
+
+    print(f'llm_out: {llm_out}')
 
     return {
         "plan": llm_out.get("plan"),
