@@ -1,22 +1,38 @@
-from app.config_env import REPO_ROOT, get_openai_key, load_all_dotenv, openai_key_diagnostics
+from app.config_env import REPO_ROOT, get_openai_key, load_all_dotenv, openai_key_diagnostics, get_mongodb_db_name
 
 load_all_dotenv()
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAIError
 
-from app.db.database import init_db
-from app.routers import assignments, books, content, submissions
+from app.db.mongo import ping_mongo
+from app.routers import assignments, auth, books, content, portal, submissions
 from app.services.openai_client import get_openai_client
 
-app = FastAPI(title="AI-Aware Assignment Platform API", version="0.1.0")
+app = FastAPI(title="BadteChalo API", version="0.2.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "https://badte.chalo.alteredai.care",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
 def on_startup():
-    init_db()
+    if not ping_mongo():
+        raise RuntimeError("MongoDB Atlas is not reachable. Check MONGODB_URI in backend/.env")
 
 
+app.include_router(auth.router)
+app.include_router(portal.router)
 app.include_router(books.router)
 app.include_router(content.router)
 app.include_router(assignments.router)
@@ -25,12 +41,16 @@ app.include_router(submissions.router)
 
 @app.get("/")
 def root():
-    return {"message": "Backend ready. Use /docs for API explorer."}
+    return {"message": "Backend ready. Use /docs for API explorer.", "database": get_mongodb_db_name()}
+
+
+@app.get("/health/mongo")
+def health_mongo():
+    return {"ok": ping_mongo(), "database": get_mongodb_db_name()}
 
 
 @app.get("/health/config")
 def health_config():
-    """Where the server looks for secrets (no key material returned)."""
     load_all_dotenv()
     key = get_openai_key()
     app_dot = REPO_ROOT / "app" / ".env"
@@ -38,14 +58,10 @@ def health_config():
     diag = openai_key_diagnostics(key)
     return {
         "repo_root": str(REPO_ROOT.resolve()),
-        "app_dotenv_path": str(app_dot),
-        "root_dotenv_path": str(root_dot),
-        "app_dotenv_exists": app_dot.is_file(),
-        "root_dotenv_exists": root_dot.is_file(),
+        "mongodb_ok": ping_mongo(),
+        "mongodb_database": get_mongodb_db_name(),
         "openai_key_configured": bool(key),
-        "openai_key_preview": (f"…{key[-6:]}" if len(key) >= 10 else ("(short)" if key else None)),
         "openai_key_diagnostics": diag,
-        "note": "openai_key_configured only means non-empty locally. Use GET /health/openai to verify with OpenAI.",
     }
 
 
@@ -53,28 +69,17 @@ def _connection_troubleshooting_hint() -> str:
     return (
         "Could not reach api.openai.com reliably (network or TLS). "
         "Try in order: (1) VPN/firewall allows HTTPS to api.openai.com. "
-        "(2) Restart uvicorn after saving app/.env — the API client uses the OS certificate store by default. "
-        "(3) Corporate proxy: set HTTPS_PROXY (and HTTP_PROXY if needed). "
-        "(4) Custom CA bundle: set SSL_CERT_FILE to your org root PEM. "
-        "(5) Dev-only workaround: OPENAI_INSECURE_SSL=1 in app/.env (disables TLS verification; remove for production)."
+        "(2) Restart uvicorn after saving app/.env. "
+        "(3) Corporate proxy: set HTTPS_PROXY. "
     )
 
 
 @app.get("/health/openai")
 def health_openai():
-    """
-    Smoke-test OpenAI: one embedding + one tiny chat completion.
-    Does not log or return any part of the API key.
-    """
     load_all_dotenv()
     key = get_openai_key()
     if not key:
-        return {
-            "configured": False,
-            "embeddings_ok": False,
-            "chat_ok": False,
-            "detail": "No OpenAI key found. Set OPENAI_API_KEY or OPENAI_KEY (e.g. in app/.env).",
-        }
+        return {"configured": False, "embeddings_ok": False, "chat_ok": False, "detail": "No OpenAI key found."}
 
     result = {
         "configured": True,
@@ -87,69 +92,18 @@ def health_openai():
     }
     try:
         client = get_openai_client()
-        emb = client.embeddings.create(
-            model="text-embedding-3-small",
-            input="healthcheck",
-        )
-        vec = emb.data[0].embedding
+        emb = client.embeddings.create(model="text-embedding-3-small", input="healthcheck")
         result["embeddings_ok"] = True
-        result["embedding_dimensions"] = len(vec)
-
+        result["embedding_dimensions"] = len(emb.data[0].embedding)
         chat = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "user", "content": "Reply with exactly the single word: OK"}
-            ],
+            messages=[{"role": "user", "content": "Reply with exactly the single word: OK"}],
             max_tokens=16,
         )
-        reply = (chat.choices[0].message.content or "").strip()
         result["chat_ok"] = True
-        result["chat_reply_preview"] = reply[:120]
+        result["chat_reply_preview"] = (chat.choices[0].message.content or "").strip()[:120]
     except OpenAIError as exc:
         result["detail"] = str(exc)
-        err = str(exc).lower()
-        if "401" in err or "invalid_api_key" in err or "incorrect api key" in err:
-            result["how_to_fix"] = (
-                "OpenAI rejected this key. Open https://platform.openai.com/api-keys , create a new "
-                "secret key, copy the entire value (one line, no spaces or quotes), put it in app/.env as "
-                "OPENAI_KEY=sk-... or OPENAI_API_KEY=sk-... , save, then restart uvicorn. "
-                "If you ever pasted a key in chat or committed it, assume it is compromised and rotate."
-            )
-        if any(
-            w in err
-            for w in (
-                "connection",
-                "connect",
-                "timeout",
-                "ssl",
-                "tls",
-                "certificate",
-                "10060",
-                "10054",
-                "refused",
-                "unreachable",
-            )
-        ):
-            result["how_to_fix_connection"] = _connection_troubleshooting_hint()
     except Exception as exc:  # noqa: BLE001
         result["detail"] = f"{type(exc).__name__}: {exc}"
-        low = result["detail"].lower()
-        if any(
-            w in low
-            for w in (
-                "connection",
-                "connect",
-                "ssl",
-                "certificate",
-                "tls",
-                "timed out",
-                "timeout",
-                "10060",
-                "10054",
-                "refused",
-                "unreachable",
-            )
-        ):
-            result["how_to_fix_connection"] = _connection_troubleshooting_hint()
-
     return result

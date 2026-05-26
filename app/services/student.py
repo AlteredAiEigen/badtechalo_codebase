@@ -3,50 +3,37 @@ from __future__ import annotations
 import datetime
 from typing import Any, Dict, Optional
 
-from sqlalchemy.orm import Session
-
-from app.db.models import Submission, Assignment
+from app.db.repositories import assignments as assignments_repo
+from app.db.repositories import submissions as submissions_repo
 from app.services.openai_client import get_openai_client
 
 
-def append_event(submission: Submission, event_type: str, content: dict, db: Session):
-    """Append-only event to process_log."""
-    log = list(submission.process_log or [])
+def append_event(submission: Dict[str, Any], event_type: str, content: dict) -> Dict[str, Any]:
+    log = list(submission.get("process_log") or [])
     log.append({
         "timestamp": datetime.datetime.utcnow().isoformat(),
         "event_type": event_type,
-        "stage_index": submission.current_stage_index,
+        "stage_index": submission.get("current_stage_index", 0),
         "content": content,
     })
-    submission.process_log = log
-    db.add(submission)
-    db.commit()
-    db.refresh(submission)
+    return submissions_repo.update(submission["id"], {"process_log": log}) or submission
 
 
-def get_assignment_stages(assignment: Assignment) -> list[dict]:
-    """Get stages from the assignment (workflow_stages holds the generated stages)."""
-    return assignment.workflow_stages or []
+def get_assignment_stages(assignment: Dict[str, Any]) -> list:
+    return assignment.get("workflow_stages") or []
 
 
-def get_current_stage(submission: Submission) -> Optional[dict]:
-    """Return the stage dict the student is currently on, or None if done."""
-    stages = get_assignment_stages(submission.assignment)
-    idx = submission.current_stage_index or 0
+def get_current_stage(submission: Dict[str, Any], assignment: Dict[str, Any]) -> Optional[dict]:
+    stages = get_assignment_stages(assignment)
+    idx = submission.get("current_stage_index") or 0
     if idx >= len(stages):
         return None
     return stages[idx]
 
 
-def validate_checkpoint_submission(
-    stage: dict,
-    student_work: str,
-    friction_answer: str | None,
-) -> tuple[bool, str]:
-    """Check that the student has provided enough work for the checkpoint."""
+def validate_checkpoint_submission(stage: dict, student_work: str, friction_answer: str | None) -> tuple[bool, str]:
     if not student_work or len(student_work.strip()) < 30:
         return False, "Please write at least a few sentences of genuine work before submitting this checkpoint."
-
     if stage.get("is_friction_point") and (not friction_answer or len(friction_answer.strip()) < 20):
         return False, (
             f"This stage is a friction point. You must answer the justification question: "
@@ -56,68 +43,52 @@ def validate_checkpoint_submission(
 
 
 def submit_checkpoint(
-    db: Session,
-    submission: Submission,
+    submission: Dict[str, Any],
+    assignment: Dict[str, Any],
     student_work: str,
     friction_answer: str | None = None,
 ) -> Dict[str, Any]:
-    """Submit work for the current stage checkpoint and advance to next stage."""
-    stages = get_assignment_stages(submission.assignment)
-    idx = submission.current_stage_index or 0
-
+    stages = get_assignment_stages(assignment)
+    idx = submission.get("current_stage_index") or 0
     if idx >= len(stages):
         return {"error": "All stages already completed."}
-
     stage = stages[idx]
-
     ok, msg = validate_checkpoint_submission(stage, student_work, friction_answer)
     if not ok:
         return {"error": msg}
 
-    append_event(submission, "checkpoint_submit", {
+    submission = append_event(submission, "checkpoint_submit", {
         "stage_number": stage.get("stage_number", idx + 1),
         "stage_name": stage.get("stage_name", f"Stage {idx + 1}"),
         "student_work": student_work,
         "friction_answer": friction_answer,
         "word_count": len(student_work.split()),
-    }, db)
+    })
 
-    submission.current_stage_index = idx + 1
+    new_idx = idx + 1
+    patch: Dict[str, Any] = {"current_stage_index": new_idx}
+    if new_idx >= len(stages):
+        patch["status"] = "submitted"
+        patch["final_submission"] = {"completed_stages": new_idx, "total_stages": len(stages)}
+    submission = submissions_repo.update(submission["id"], patch) or submission
 
-    if idx + 1 >= len(stages):
-        submission.status = "submitted"
-        submission.final_submission = {
-            "completed_stages": idx + 1,
-            "total_stages": len(stages),
-        }
-
-    db.add(submission)
-    db.commit()
-    db.refresh(submission)
-
-    next_stage = stages[idx + 1] if idx + 1 < len(stages) else None
+    next_stage = stages[new_idx] if new_idx < len(stages) else None
     return {
         "status": "ok",
         "completed_stage": stage.get("stage_name"),
-        "new_stage_index": submission.current_stage_index,
+        "new_stage_index": submission.get("current_stage_index"),
         "next_stage": next_stage.get("stage_name") if next_stage else None,
-        "all_done": submission.current_stage_index >= len(stages),
-        "submission_status": submission.status,
+        "all_done": submission.get("current_stage_index", 0) >= len(stages),
+        "submission_status": submission.get("status"),
     }
 
 
 def generate_ai_help(
-    submission: Submission,
+    submission: Dict[str, Any],
+    assignment: Dict[str, Any],
     student_attempt: str,
-    db: Session,
 ) -> Dict[str, Any]:
-    """
-    AI help for the current stage. Enforces:
-    - Stage must be Yellow or Green (not Red)
-    - Student must have written something first (brain-first)
-    - AI plays the specific role defined for this stage
-    """
-    stage = get_current_stage(submission)
+    stage = get_current_stage(submission, assignment)
     if not stage:
         return {"error": "No current stage — assignment may be complete."}
 
@@ -136,14 +107,12 @@ def generate_ai_help(
 
     ai_role = stage.get("ai_role") or "learning coach"
     stage_name = stage.get("stage_name", "this stage")
-
     prompt = f"""You are acting as a "{ai_role}" for a student working on an assignment.
 
 IMPORTANT RULES:
 - You are ONLY a {ai_role}. Do NOT do the student's work for them.
 - Do NOT write their essay/answer. Give feedback, hints, questions, or suggestions.
 - The student has already produced their own attempt (brain-first). Help them improve it.
-- Be encouraging but honest. Point out strengths and areas to improve.
 
 Stage: {stage_name}
 Stage instructions: {stage.get('instructions', '')}
@@ -166,8 +135,8 @@ Provide your response as a {ai_role}:"""
         "stage_name": stage_name,
         "ai_role": ai_role,
         "student_attempt_preview": student_attempt[:200],
-        "ai_response_preview": ai_response[:200],
-    }, db)
+        "ai_response_preview": (ai_response or "")[:200],
+    })
 
     return {
         "ai_role": ai_role,

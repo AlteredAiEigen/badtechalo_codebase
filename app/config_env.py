@@ -86,3 +86,51 @@ def openai_key_diagnostics(key: str) -> dict:
     if not k.startswith("sk-"):
         out["issues"].append("expected_prefix_sk")
     return out
+
+
+def get_mongodb_uri() -> str:
+    load_all_dotenv()
+    app_dot = dotenv_values(_REPO_ROOT / "app" / ".env")
+    root_dot = dotenv_values(_REPO_ROOT / ".env")
+    raw = (
+        (app_dot.get("MONGODB_URI") or "").strip()
+        or (root_dot.get("MONGODB_URI") or "").strip()
+        or os.getenv("MONGODB_URI")
+        or ""
+    )
+    return _normalize_secret(raw or "")
+
+
+def get_mongodb_db_name() -> str:
+    load_all_dotenv()
+    app_dot = dotenv_values(_REPO_ROOT / "app" / ".env")
+    root_dot = dotenv_values(_REPO_ROOT / ".env")
+    raw = (
+        (app_dot.get("MONGODB_DB") or "").strip()
+        or (root_dot.get("MONGODB_DB") or "").strip()
+        or os.getenv("MONGODB_DB")
+        or "badtechalo"
+    )
+    return raw
+
+
+def get_jwt_secret() -> str:
+    load_all_dotenv()
+    app_dot = dotenv_values(_REPO_ROOT / "app" / ".env")
+    root_dot = dotenv_values(_REPO_ROOT / ".env")
+    raw = (
+        (app_dot.get("JWT_SECRET") or "").strip()
+        or (root_dot.get("JWT_SECRET") or "").strip()
+        or os.getenv("JWT_SECRET")
+        or "badtechalo-dev-secret-change-in-production"
+    )
+    return _normalize_secret(raw)
+
+
+def get_jwt_expire_minutes() -> int:
+    load_all_dotenv()
+    raw = os.getenv("JWT_EXPIRE_MINUTES") or "10080"
+    try:
+        return int(raw)
+    except ValueError:
+        return 10080

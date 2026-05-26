@@ -73,6 +73,8 @@ def migrate_sqlite_schema() -> None:
             conn.execute(text("ALTER TABLE assignments ADD COLUMN content_source VARCHAR(32) DEFAULT 'chapter_json'"))
         if "chapter_whole" not in acols:
             conn.execute(text("ALTER TABLE assignments ADD COLUMN chapter_whole BOOLEAN DEFAULT 1"))
+        if "ui_metadata" not in acols:
+            conn.execute(text("ALTER TABLE assignments ADD COLUMN ui_metadata TEXT"))
 
 
 def get_db():

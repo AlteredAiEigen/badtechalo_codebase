@@ -77,6 +77,7 @@ class Assignment(Base):
     chapter_whole = Column(Boolean, default=True)
     content_source = Column(String(32), default="chapter_json")  # chapter_json | rag_chunks
     created_by = Column(String)  # teacher id or name for now
+    ui_metadata = Column(JSON, default=dict)  # class_group, subject, due_date, tried_out, etc.
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

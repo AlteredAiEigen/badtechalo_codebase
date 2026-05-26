@@ -22,11 +22,15 @@ def chapter_json_path() -> Path:
 
 @lru_cache(maxsize=1)
 def load_chapter_data() -> Dict[str, Any]:
-    path = chapter_json_path()
-    if not path.is_file():
-        raise FileNotFoundError(f"Chapter data not found: {path}")
-    with path.open(encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        from app.db.repositories import chapters as chapters_repo
+        return chapters_repo.load_chapter_data()
+    except Exception:
+        path = chapter_json_path()
+        if not path.is_file():
+            raise FileNotFoundError(f"Chapter data not found: {path}")
+        with path.open(encoding="utf-8") as f:
+            return json.load(f)
 
 
 def clear_chapter_cache() -> None:

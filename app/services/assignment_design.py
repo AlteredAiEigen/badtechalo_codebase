@@ -1,7 +1,6 @@
 import json
 from typing import List, Dict, Any, Optional
-from sqlalchemy.orm import Session
-from app.db.models import Chunk
+from app.db.repositories import books as books_repo
 from app.services.chapter_content import chapter_context_for_scope
 from app.services.openai_client import get_openai_client
 
@@ -158,9 +157,11 @@ Teacher Notes: {notes}
 """
 
 
-def retrieve_relevant_chunks(db: Session, book_id: int, query: str, top_k: int = 8) -> List[Chunk]:
-    """Embedding similarity search (in-memory for v1)."""
-    chunks = db.query(Chunk).filter(Chunk.book_id == book_id).all()
+def retrieve_relevant_chunks(book_id: int, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
+    """Embedding similarity search from MongoDB chunks."""
+    from app.db.repositories import books as books_repo
+
+    chunks = books_repo.list_chunks(book_id)
     if not chunks:
         return []
 
@@ -174,32 +175,23 @@ def retrieve_relevant_chunks(db: Session, book_id: int, query: str, top_k: int =
         nb = math.sqrt(sum(x * x for x in b))
         return dot / (na * nb + 1e-8)
 
-    scored = [(c, cosine(q_emb, c.embedding or [])) for c in chunks if c.embedding]
+    scored = [(c, cosine(q_emb, c.get("embedding") or [])) for c in chunks if c.get("embedding")]
     scored.sort(key=lambda x: x[1], reverse=True)
     return [c[0] for c in scored[:top_k]]
 
 
-def retrieve_chunks_by_ids(db: Session, book_id: int, chunk_ids: List[int]) -> List[Chunk]:
-    """Load chunks by primary key in the given order (same book only)."""
-    if not chunk_ids:
-        return []
-    rows = (
-        db.query(Chunk)
-        .filter(Chunk.book_id == book_id, Chunk.id.in_(chunk_ids))
-        .all()
-    )
-    by_id = {c.id: c for c in rows}
-    return [by_id[i] for i in chunk_ids if i in by_id]
+def retrieve_chunks_by_ids(book_id: int, chunk_ids: List[int]) -> List[Dict[str, Any]]:
+    from app.db.repositories import books as books_repo
+    return books_repo.get_chunks_by_ids(book_id, chunk_ids)
 
 
-def _build_context_text(chunks: List[Chunk]) -> str:
+def _build_context_text(chunks: List[Dict[str, Any]]) -> str:
     return "\n\n---\n\n".join(
-        f"Topic: {c.topic}\nPage: {c.page_start}\n{c.text[:1200]}" for c in chunks
+        f"Topic: {c.get('topic')}\nPage: {c.get('page_start')}\n{(c.get('text') or '')[:1200]}" for c in chunks
     )
 
 
 def generate_assignment_plan(
-    db: Session,
     book_id: int,
     title: str,
     learning_objectives: List[str],
@@ -224,9 +216,9 @@ def generate_assignment_plan(
         )
     else:
         content_source = "rag_chunks"
-        relevant_chunks = retrieve_relevant_chunks(db, book_id, scope_query)
+        relevant_chunks = retrieve_relevant_chunks(book_id, scope_query)
         context_text = _build_context_text(relevant_chunks)
-        rag_chunk_ids = [c.id for c in relevant_chunks]
+        rag_chunk_ids = [c["id"] for c in relevant_chunks]
 
     prompt = DECISION_PROTOCOL_PROMPT.format(
         context=context_text[:12000],
@@ -244,25 +236,25 @@ def generate_assignment_plan(
     )
 
     llm_out = json.loads(resp.choices[0].message.content)
+
+    # LLM returns the plan at top level; keep backward-compatible nested "plan" if present.
+    plan_payload = llm_out.get("plan") if isinstance(llm_out.get("plan"), dict) else llm_out
     stored_topic_ids = None
     if use_chapter_content and not whole_chapter:
         stored_topic_ids = selected_topic_ids
 
-    print(f'llm_out: {llm_out}')
-
     return {
-        "plan": llm_out.get("plan"),
-        "prompt_template": llm_out.get("prompt_template"),
+        "plan": plan_payload,
+        "prompt_template": llm_out.get("prompt_template") or json.dumps(plan_payload, indent=2),
         "rag_chunk_ids": rag_chunk_ids,
         "content_source": content_source,
-        "chapter_topic_ids": stored_topic_ids,
+        "chapter_topic_ids": stored_topic_ids if use_chapter_content and not whole_chapter else selected_topic_ids,
         "chapter_whole": bool(use_chapter_content and whole_chapter),
         "scope_label": scope_label,
     }
 
 
 def generate_final_assignment(
-    db: Session,
     book_id: int,
     approved_plan: dict,
     scope_query: str = "",
@@ -281,10 +273,10 @@ def generate_final_assignment(
             scope_query=scope_query,
         )
     elif scope_query.strip():
-        relevant_chunks = retrieve_relevant_chunks(db, book_id, scope_query)
+        relevant_chunks = retrieve_relevant_chunks(book_id, scope_query)
         context_text = _build_context_text(relevant_chunks)
     elif plan_rag_chunk_ids:
-        relevant_chunks = retrieve_chunks_by_ids(db, book_id, plan_rag_chunk_ids)
+        relevant_chunks = retrieve_chunks_by_ids(book_id, plan_rag_chunk_ids)
         context_text = _build_context_text(relevant_chunks)
     else:
         context_text = "(no additional context)"
